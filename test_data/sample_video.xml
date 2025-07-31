@@ -1,0 +1,20 @@
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"
+  xmlns="http://www.w3.org/2005/Atom">
+  <link rel="hub" href="https://pubsubhubbub.appspot.com" />
+  <link rel="self" href="https://www.youtube.com/xml/feeds/videos.xml?channel_id=CHANNEL_ID" />
+  <title>YouTube video feed</title>
+  <updated>2015-04-01T19:05:24.552394234+00:00</updated>
+  <entry>
+    <id>yt:video:29w5v9DRHY0</id>
+    <yt:videoId>29w5v9DRHY0</yt:videoId>
+    <yt:channelId>UCHtv-7yDeac7OSfPJA_a6aA</yt:channelId>
+    <title>Natalee Norman - appearance</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=29w5v9DRHY0" />
+    <author>
+      <name>Name Look</name>
+      <uri>https://www.youtube.com/channel/UCHtv-7yDeac7OSfPJA_a6aA</uri>
+    </author>
+    <published>2025-07-31T09:14:50+00:00</published>
+    <updated>2025-07-31T09:14:53.261256219+00:00</updated>
+  </entry>
+</feed>
