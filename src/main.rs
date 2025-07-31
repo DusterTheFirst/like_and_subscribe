@@ -85,7 +85,11 @@ async fn youtube_pubsub(client: &reqwest::Client) -> color_eyre::Result<()> {
                     method_routing::get(
                         |query: Result<Query<HubChallenge>, QueryRejection>| async move {
                             match query {
-                                Ok(Query(query)) => {
+                                Ok(Query(HubChallenge::Unsubscribe(query))) => {
+                                    trace!(?query, "validating unsubscription");
+                                    Ok(query.challenge)
+                                }
+                                Ok(Query(HubChallenge::Subscribe(query))) => {
                                     trace!(?query, "validating subscription");
                                     Ok(query.challenge)
                                 }
@@ -109,15 +113,31 @@ async fn youtube_pubsub(client: &reqwest::Client) -> color_eyre::Result<()> {
     });
 
     #[derive(Debug, Deserialize)]
-    struct HubChallenge {
+    #[serde(tag = "hub.mode")]
+    enum HubChallenge {
+        #[serde(rename = "subscribe")]
+        Subscribe(HubSubscribeChallenge),
+        #[serde(rename = "unsubscribe")]
+        Unsubscribe(HubUnsubscribeChallenge),
+    }
+
+    // TODO: unsubscribe on shutdown???
+    #[derive(Debug, Deserialize)]
+    struct HubSubscribeChallenge {
         #[serde(rename = "hub.topic")]
         topic: String,
         #[serde(rename = "hub.challenge")]
         challenge: String,
-        #[serde(rename = "hub.mode")]
-        mode: Mode,
         #[serde(rename = "hub.lease_seconds")]
-        lease_seconds: u64,
+        lease_seconds: String, // I think integers are special cased when at the root
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct HubUnsubscribeChallenge {
+        #[serde(rename = "hub.topic")]
+        topic: String,
+        #[serde(rename = "hub.challenge")]
+        challenge: String,
     }
 
     #[derive(Debug, Deserialize, Serialize)]
