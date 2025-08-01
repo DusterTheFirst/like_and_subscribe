@@ -4,9 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 mod test {
-    use jiff::civil::DateTime;
-
-    use crate::feed::{Entry, Feed};
+    use crate::feed::Feed;
 
     #[test]
     fn parse_sample_file() {
