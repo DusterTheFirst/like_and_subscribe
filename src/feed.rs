@@ -20,21 +20,21 @@ pub struct Feed {
     _namespace: MustBe!("http://www.w3.org/2005/Atom"),
     #[serde(rename = "@xmlns:yt")]
     _namespace_yt: MustBe!("http://www.youtube.com/xml/schemas/2015"),
-    title: String,
-    updated: DateTime,
-    entry: Entry,
+    pub title: String,
+    pub updated: DateTime,
+    pub entry: Entry,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Entry {
-    id: String,
+    pub id: String,
     #[serde(rename = "yt:videoId")]
     #[serde(alias = "videoId")] // quick_xml ignores namespace prefixes with serde
-    video_id: String,
+    pub video_id: String,
     #[serde(rename = "yt:channelId")]
     #[serde(alias = "channelId")] // quick_xml ignores namespace prefixes with serde
-    channel_id: String,
-    title: String,
-    published: DateTime,
-    updated: DateTime,
+    pub channel_id: String,
+    pub title: String,
+    pub published: DateTime,
+    pub updated: DateTime,
 }

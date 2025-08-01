@@ -1,21 +1,20 @@
-use std::{fs::File, io::BufReader, time::Duration};
+use std::{collections::HashMap, fs::File, io::BufReader, sync::{Arc, Mutex}, time::Duration};
 
 use color_eyre::eyre::{Context, eyre};
 use google_youtube3::{
     YouTube,
-    api::{PlaylistItem, PlaylistItemContentDetails, PlaylistItemSnippet, ResourceId, Scope},
+    api::{PlaylistItem, PlaylistItemContentDetails, PlaylistItemSnippet, ResourceId},
     yup_oauth2::{self, ConsoleApplicationSecret},
 };
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
-use reqwest::{StatusCode, header};
-use tokio::{join, sync::mpsc::Receiver, try_join};
-use tracing::info;
+use tokio::{sync::mpsc::Receiver, try_join};
+use tower::ServiceBuilder;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 use crate::{
     feed::Feed,
-    pubsub::{youtube_pubsub_reciever, youtube_pubsub_subscription_manager},
+    pubsub::{youtube_pubsub_reciever, youtube_pubsub_subscription_manager, YoutubeChannelSubscription},
 };
 
 mod feed;
@@ -51,7 +50,12 @@ async fn main() -> color_eyre::Result<()> {
     // TODO: make sure using gzip (or other compression)
     let client = reqwest::ClientBuilder::new()
         .https_only(true)
-        .connector_layer(tower::limit::concurrency::ConcurrencyLimitLayer::new(10))
+        .connector_layer(
+            ServiceBuilder::new()
+                .buffer(1024)
+                .rate_limit(5, Duration::from_secs(10))
+                .concurrency_limit(10),
+        )
         .build()
         .wrap_err("Unable to setup reqwest client")?;
 
@@ -84,15 +88,22 @@ async fn main() -> color_eyre::Result<()> {
                 .build(),
         );
 
-    let hub = YouTube::new(hyper_client, auth);
+    let youtube = YouTube::new(hyper_client, auth);
 
     let (new_video_sender, new_video_reciever) = tokio::sync::mpsc::channel(32);
 
+
+    // TODO: some way to verify that the subscriptions are actually subscribed, maybe once a day?
+    // https://pubsubhubbub.appspot.com/subscription-details?hub.callback=https%3A%2F%2Flenovo-fedora.taila5e2a.ts.net%2Fpubsub&hub.topic=https%3A%2F%2Fwww.youtube.com%2Fxml%2Ffeeds%2Fvideos.xml%3Fchannel_id%3DUCHtv-7yDeac7OSfPJA_a6aA&hub.secret=
+
+    // Both web server and playlist modifier must update this....
+    let subscriptions = Arc::new(Mutex::new(HashMap::<String, YoutubeChannelSubscription>::new()));
+
     // TODO: should these be actors/tasks? the reciever is basically already one
     try_join!(
-        youtube_pubsub_reciever(new_video_sender),
-        // youtube_playlist_modifier(&client, hub.clone(), new_video_reciever),
-        youtube_pubsub_subscription_manager(&client, hub)
+        youtube_pubsub_reciever(new_video_sender, subscriptions.clone()),
+        youtube_playlist_modifier(&client, youtube.clone(), playlist_id, new_video_reciever),
+        youtube_pubsub_subscription_manager(&client, youtube, &subscriptions)
     )
     .map(|_| ())
 }
@@ -100,10 +111,13 @@ async fn main() -> color_eyre::Result<()> {
 async fn youtube_playlist_modifier(
     http_client: &reqwest::Client,
     youtube: YouTube<HttpsConnector<HttpConnector>>,
-    reciever: Receiver<Feed>,
+    playlist_id: String,
+    mut reciever: Receiver<Feed>,
 ) -> color_eyre::Result<()> {
-    let playlist_id = std::env::var("YOUTUBE_PLAYLIST_ID")
-        .wrap_err("Unable to read YOUTUBE_PLAYLIST_ID env var")?;
+    while let Some(feed) = reciever.recv().await {
+        // TODO: verify that it is not a short, and it is a new upload, not a modified old one
+        dbg!(feed);
+    }
 
     let (response, playlist_item) = youtube
         .playlist_items()
