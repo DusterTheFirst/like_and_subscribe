@@ -1,12 +1,14 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
+    process::exit,
     str::FromStr as _,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use axum::{
+    Json,
     extract::{Query, State, rejection::QueryRejection},
     http::HeaderValue,
     routing::method_routing,
@@ -19,14 +21,20 @@ use google_youtube3::{
 };
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
+use jiff::{
+    Span, Timestamp, Zoned,
+    civil::{Date, DateTime},
+    tz::TimeZone,
+};
 use mime::Mime;
 use quick_xml::DeError;
 use reqwest::{StatusCode, header};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::{sync::mpsc::Sender, task::JoinSet};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
-use tracing::{Instrument, error, info, trace, trace_span, warn};
+use tracing::{Instrument, debug, error, info, trace, trace_span, warn};
 
 use crate::feed::Feed;
 
@@ -72,27 +80,28 @@ pub async fn youtube_pubsub_reciever(
                 Ok(query.challenge)
             }
             Ok(Query(HubChallenge::Subscribe(query))) => {
-                trace!(?query, "validating subscription");
-
                 let id = query
                     .topic
                     // FIXME: poor man's url parser
                     .trim_start_matches("https://www.youtube.com/xml/feeds/videos.xml?channel_id=");
+
+                let expiration = Zoned::now().saturating_add(
+                    Span::new().seconds(
+                        query
+                            .lease_seconds
+                            .parse::<i64>()
+                            .expect("lease seconds should always be a number"),
+                    ),
+                );
+
+                trace!(?query, %expiration, "validating subscription");
 
                 subscriptions
                     .lock()
                     .unwrap()
                     .entry(id.to_string())
                     .or_default()
-                    .subscription_expiration = Some(
-                    Instant::now()
-                        + Duration::from_secs(
-                            query
-                                .lease_seconds
-                                .parse()
-                                .expect("lease seconds should always be a number"),
-                        ),
-                );
+                    .subscription_expiration = Some(expiration);
 
                 Ok(query.challenge)
             }
@@ -151,10 +160,52 @@ pub async fn youtube_pubsub_reciever(
         axum::Router::new()
             .route("/pubsub", {
                 method_routing::get(pubsub_subscription)
-                    .with_state(subscriptions)
+                    .with_state(subscriptions.clone())
                     .post(pubsub_new_upload)
                     .with_state(new_video_channel)
             })
+            .route(
+                "/debug",
+                method_routing::get(
+                    |State(subscriptions): State<
+                        Arc<Mutex<HashMap<String, YoutubeChannelSubscription>>>,
+                    >| async move {
+                        let subscriptions = HashMap::clone(&subscriptions.lock().unwrap());
+                        let (subscribed, soonest_expiration, latest_expiration) =
+                            subscriptions.values().fold(
+                                (
+                                    0,
+                                    Zoned::new(Timestamp::MAX, TimeZone::system()),
+                                    Zoned::new(Timestamp::MIN, TimeZone::system()),
+                                ),
+                                |(subscribed, soonest_expiration, latest_expiration), s| {
+                                    if let Some(expiration) = s.subscription_expiration.as_ref() {
+                                        (
+                                            subscribed + 1,
+                                            Zoned::min(soonest_expiration, expiration.clone()),
+                                            Zoned::max(latest_expiration, expiration.clone()),
+                                        )
+                                    } else {
+                                        (subscribed, soonest_expiration, latest_expiration)
+                                    }
+                                },
+                            );
+
+                        Json(json!({
+                            "stats": {
+                                "subscribed": subscribed,
+                                "total": subscriptions.len(),
+                                "expiration": {
+                                    "soonest": soonest_expiration,
+                                    "latest": latest_expiration
+                                }
+                            },
+                            "subscriptions":subscriptions
+                        }))
+                    },
+                )
+                .with_state(subscriptions),
+            )
             .fallback(method_routing::any(|| async {
                 axum::http::StatusCode::PAYMENT_REQUIRED
             }))
@@ -192,10 +243,10 @@ pub enum Verify {
     Synchronous,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Clone)]
 pub struct YoutubeChannelSubscription {
     pub name: String,
-    pub subscription_expiration: Option<Instant>,
+    pub subscription_expiration: Option<Zoned>,
     pub stale: bool,
 }
 
@@ -254,7 +305,14 @@ pub async fn youtube_pubsub_subscription_manager(
                 .unwrap();
 
             if response.status() == StatusCode::NOT_MODIFIED {
-                info!("not changed"); // TODO: what
+                info!("not changed");
+
+                // Mark all existing subscriptions as not stale
+                subscriptions
+                    .lock()
+                    .unwrap()
+                    .values_mut()
+                    .for_each(|s| s.stale = false);
 
                 break;
             }
@@ -336,6 +394,8 @@ pub async fn youtube_pubsub_subscription_manager(
 
                         if response.status() == StatusCode::TOO_MANY_REQUESTS {
                             // TODO: retries from too many requests
+                            error!("too many requests");
+                            exit(1);
                             todo!();
                         }
 
@@ -360,6 +420,9 @@ pub async fn youtube_pubsub_subscription_manager(
 
             subscriptions
                 .extract_if(|_, sub| sub.stale)
+                .inspect(|(channel_id, sub)| {
+                    debug!(?channel_id, name = sub.name, "removing stale subscription");
+                })
                 .map(|(id, _)| id)
                 .collect::<Vec<_>>()
         })
@@ -370,11 +433,13 @@ pub async fn youtube_pubsub_subscription_manager(
 
             subscriptions
                 .iter()
-                .filter(|(_, s)| match s.subscription_expiration {
+                .filter(|(_, s)| match s.subscription_expiration.as_ref() {
                     Some(expiration) => {
+                        let now = Zoned::now();
+
                         // re-subscribe if expring in a day
-                        expiration.saturating_duration_since(Instant::now())
-                            <= Duration::from_secs(60 * 60 * 24) // One day
+                        expiration.duration_since(&now)
+                            <= Span::new().days(1).to_duration(&now).unwrap()
                     }
                     None => true,
                 })
@@ -383,6 +448,22 @@ pub async fn youtube_pubsub_subscription_manager(
         })
         .await;
 
-        info!("subscriptions: {subscriptions:#?}");
+        let subscriptions = subscriptions.lock().unwrap();
+        let total_count = subscriptions.len();
+        let stale_count = subscriptions.values().filter(|s| s.stale).count();
+        let subscribed_count = subscriptions
+            .values()
+            .filter(|s| s.subscription_expiration.is_some())
+            .count();
+        let soonest_expiration = subscriptions
+            .values()
+            .flat_map(|s| s.subscription_expiration.as_ref())
+            .max()
+            .map(|exp| exp.to_string());
+
+        info!(
+            total_count,
+            stale_count, subscribed_count, soonest_expiration, "subscription update finish"
+        );
     }
 }

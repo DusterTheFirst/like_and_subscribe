@@ -1,4 +1,11 @@
-use std::{collections::HashMap, fs::File, io::BufReader, sync::{Arc, Mutex}, time::Duration};
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+    fs::File,
+    io::BufReader,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use color_eyre::eyre::{Context, eyre};
 use google_youtube3::{
@@ -8,13 +15,18 @@ use google_youtube3::{
 };
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
+use jiff::{Span, SpanCompare, Unit};
 use tokio::{sync::mpsc::Receiver, try_join};
 use tower::ServiceBuilder;
+use tracing::{Instrument, debug, trace_span};
+use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 use crate::{
     feed::Feed,
-    pubsub::{youtube_pubsub_reciever, youtube_pubsub_subscription_manager, YoutubeChannelSubscription},
+    pubsub::{
+        YoutubeChannelSubscription, youtube_pubsub_reciever, youtube_pubsub_subscription_manager,
+    },
 };
 
 mod feed;
@@ -26,6 +38,7 @@ async fn main() -> color_eyre::Result<()> {
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
+        .with(ErrorLayer::default())
         .with(EnvFilter::from_default_env())
         .init();
 
@@ -53,7 +66,7 @@ async fn main() -> color_eyre::Result<()> {
         .connector_layer(
             ServiceBuilder::new()
                 .buffer(1024)
-                .rate_limit(5, Duration::from_secs(10))
+                .rate_limit(5, Duration::from_secs(10)) // TODO: does this mean 5 sets of 10?
                 .concurrency_limit(10),
         )
         .build()
@@ -92,12 +105,13 @@ async fn main() -> color_eyre::Result<()> {
 
     let (new_video_sender, new_video_reciever) = tokio::sync::mpsc::channel(32);
 
-
     // TODO: some way to verify that the subscriptions are actually subscribed, maybe once a day?
     // https://pubsubhubbub.appspot.com/subscription-details?hub.callback=https%3A%2F%2Flenovo-fedora.taila5e2a.ts.net%2Fpubsub&hub.topic=https%3A%2F%2Fwww.youtube.com%2Fxml%2Ffeeds%2Fvideos.xml%3Fchannel_id%3DUCHtv-7yDeac7OSfPJA_a6aA&hub.secret=
 
     // Both web server and playlist modifier must update this....
-    let subscriptions = Arc::new(Mutex::new(HashMap::<String, YoutubeChannelSubscription>::new()));
+    let subscriptions = Arc::new(Mutex::new(
+        HashMap::<String, YoutubeChannelSubscription>::new(),
+    ));
 
     // TODO: should these be actors/tasks? the reciever is basically already one
     try_join!(
@@ -114,46 +128,65 @@ async fn youtube_playlist_modifier(
     playlist_id: String,
     mut reciever: Receiver<Feed>,
 ) -> color_eyre::Result<()> {
-    while let Some(feed) = reciever.recv().await {
-        // TODO: verify that it is not a short, and it is a new upload, not a modified old one
-        dbg!(feed);
+    while let Some(Feed {
+        title,
+        updated,
+        ref entry,
+        ..
+    }) = reciever.recv().await
+    {
+        async {
+            debug!("validating new subscription");
+            // TODO: verify that it is not a short, and it is a new upload, not a modified old one
+
+            // let updated_before_publish = entry.published >= entry.updated;
+            let published_within_one_hour_of_feed_update = (updated - entry.published)
+                .total((Unit::Hour, updated))
+                .unwrap()
+                <= 1.0;
+
+            dbg!(published_within_one_hour_of_feed_update);
+
+            debug!("inserting new subscription");
+
+            youtube
+                .playlist_items()
+                .insert(PlaylistItem {
+                    snippet: Some(PlaylistItemSnippet {
+                        playlist_id: Some(playlist_id.clone()),
+                        resource_id: Some(ResourceId {
+                            kind: Some("youtube#video".into()),
+                            video_id: Some(entry.video_id.clone()),
+                            ..Default::default()
+                        }),
+                        // position: todo!(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .doit()
+                .await
+                .wrap_err("failed to insert playlist item")
+        }
+        .instrument(trace_span!(
+            "new_video",
+            video_id = entry.video_id,
+            channel_id = entry.channel_id,
+            title = entry.title
+        ))
+        .await?;
     }
 
-    let (response, playlist_item) = youtube
-        .playlist_items()
-        .insert(PlaylistItem {
-            content_details: Some(PlaylistItemContentDetails {
-                note: Some("where does this show up".into()), // Does not persist
-                ..Default::default()
-            }),
-            snippet: Some(PlaylistItemSnippet {
-                playlist_id: Some(playlist_id.clone()),
-                resource_id: Some(ResourceId {
-                    kind: Some("youtube#video".into()),
-                    video_id: Some("dQw4w9WgXcQ".into()),
-                    ..Default::default()
-                }),
-                // position: todo!(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .doit()
-        .await
-        .wrap_err("failed to insert playlist item")?;
+    // let (response, playlist_items) = youtube
+    //     .playlist_items()
+    //     .list(&vec!["snippet".into(), "contentDetails".into()])
+    //     .max_results(10)
+    //     .playlist_id(&playlist_id)
+    //     .doit()
+    //     .await
+    //     .wrap_err("failed to fetch playlist information")?;
 
-    dbg!(playlist_item);
-
-    let (response, playlist_items) = youtube
-        .playlist_items()
-        .list(&vec!["snippet".into(), "contentDetails".into()])
-        .max_results(10)
-        .playlist_id(&playlist_id)
-        .doit()
-        .await
-        .wrap_err("failed to fetch playlist information")?;
-
-    dbg!(playlist_items);
+    // dbg!(playlist_items);
 
     Ok(())
 }
