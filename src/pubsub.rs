@@ -141,6 +141,7 @@ pub async fn youtube_pubsub_reciever(
             channel_id = feed.entry.channel_id,
             title = feed.entry.title,
             video_age_minutes = tracing::field::Empty,
+            inserted = tracing::field::Empty,
         );
 
         match new_video_channel.try_send((span, feed)) {

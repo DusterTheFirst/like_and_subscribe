@@ -143,6 +143,7 @@ async fn youtube_playlist_modifier(
                     // TODO: duplicate detection
                     // TODO: shorts detection
                     debug!("inserting new video");
+                    span.record("inserted", true);
 
                     youtube
                         .playlist_items()
