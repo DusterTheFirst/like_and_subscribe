@@ -62,7 +62,7 @@ pub struct HubUnsubscribeChallenge {
 }
 
 pub async fn youtube_pubsub_reciever(
-    new_video_channel: Sender<Feed>,
+    new_video_channel: Sender<(tracing::Span, Feed)>,
     subscriptions: Arc<Mutex<HashMap<String, YoutubeChannelSubscription>>>,
 ) -> color_eyre::Result<()> {
     async fn pubsub_subscription(
@@ -71,7 +71,7 @@ pub async fn youtube_pubsub_reciever(
     ) -> Result<String, StatusCode> {
         match query {
             Ok(Query(HubChallenge::Unsubscribe(query))) => {
-                trace!(?query, "validating unsubscription");
+                trace!(topic = query.topic, "validating unsubscription");
                 Ok(query.challenge)
             }
             Ok(Query(HubChallenge::Subscribe(query))) => {
@@ -89,7 +89,7 @@ pub async fn youtube_pubsub_reciever(
                     ),
                 );
 
-                trace!(?query, %expiration, "validating subscription");
+                trace!(topic = query.topic, %expiration, "validating subscription");
 
                 subscriptions
                     .lock()
@@ -111,7 +111,7 @@ pub async fn youtube_pubsub_reciever(
         // connect: ConnectInfo<SocketAddr>,
         // TypedHeader(user_agent): TypedHeader<UserAgent>,
         TypedHeader(content_type): TypedHeader<ContentType>,
-        new_video_channel: State<Sender<Feed>>,
+        new_video_channel: State<Sender<(tracing::Span, Feed)>>,
         body: String,
     ) -> StatusCode {
         if Mime::from(content_type) != Mime::from_str("application/atom+xml").unwrap() {
@@ -121,8 +121,8 @@ pub async fn youtube_pubsub_reciever(
         // TODO: verify remote IP, user agent and others??
         // tokio::net::lookup_host("pubsubhubbub.appspot.com").await
 
-        let new_upload = match quick_xml::de::from_str::<Feed>(&body) {
-            Ok(upload) => upload,
+        let feed = match quick_xml::de::from_str::<Feed>(&body) {
+            Ok(feed) => feed,
             Err(DeError::Custom(error)) => {
                 warn!(?error, "unable to process valid xml feed item");
                 return StatusCode::UNPROCESSABLE_ENTITY;
@@ -133,9 +133,17 @@ pub async fn youtube_pubsub_reciever(
             }
         };
 
-        trace!(?new_upload, "Upload recieved");
+        let span = trace_span!(
+            "new_feed_item",
+            updated = %feed.entry.updated,
+            published = %feed.entry.published,
+            video_id = feed.entry.video_id,
+            channel_id = feed.entry.channel_id,
+            title = feed.entry.title,
+            video_age_minutes = tracing::field::Empty,
+        );
 
-        match new_video_channel.try_send(new_upload) {
+        match new_video_channel.try_send((span, feed)) {
             Ok(()) => StatusCode::ACCEPTED,
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 warn!("upload dropped due to queue being fill");
@@ -425,7 +433,10 @@ pub async fn youtube_pubsub_subscription_manager(
                         if !response.status().is_success() {
                             let status_code = response.status().as_u16();
                             warn!(status_code, "server returned error");
+                            return;
                         }
+
+                        trace!("end")
                     }
                     .instrument(span)
                 })

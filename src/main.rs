@@ -20,6 +20,7 @@ use tower::ServiceBuilder;
 use tracing::{Instrument, debug, trace, trace_span, warn};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
+use venator::Venator;
 
 use crate::{
     feed::Feed,
@@ -39,6 +40,7 @@ async fn main() -> color_eyre::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .with(ErrorLayer::default())
         .with(EnvFilter::from_default_env())
+        .with(Venator::builder().build())
         .init();
 
     tracing::trace!("a");
@@ -124,21 +126,23 @@ async fn main() -> color_eyre::Result<()> {
 async fn youtube_playlist_modifier(
     youtube: YouTube<HttpsConnector<HttpConnector>>,
     playlist_id: String,
-    mut reciever: Receiver<Feed>,
+    mut reciever: Receiver<(tracing::Span, Feed)>,
 ) -> color_eyre::Result<()> {
-    while let Some(Feed { ref entry, .. }) = reciever.recv().await {
+    while let Some((span, Feed { ref entry, .. })) = reciever.recv().await {
         async {
-            debug!("validating new subscription");
+            debug!("validating new feed item");
 
             let video_age_minutes = (entry.updated - entry.published)
                 .total((Unit::Minute, entry.updated))
                 .unwrap();
 
+            span.record("video_age_minutes", video_age_minutes);
+
             match video_age_minutes {
                 ..=1.0 => {
                     // TODO: duplicate detection
                     // TODO: shorts detection
-                    debug!(%video_age_minutes, "inserting new subscription");
+                    debug!("inserting new video");
 
                     youtube
                         .playlist_items()
@@ -160,20 +164,13 @@ async fn youtube_playlist_modifier(
                         .wrap_err("failed to insert playlist item")
                 }
                 _ => {
-                    trace!(%video_age_minutes, "ignoring updated old video");
+                    trace!("ignoring updated old video");
 
                     Ok(())
                 }
             }
         }
-        .instrument(trace_span!(
-            "new_feed_item",
-            updated = %entry.updated,
-            published = %entry.published,
-            video_id = entry.video_id,
-            channel_id = entry.channel_id,
-            title = entry.title
-        ))
+        .instrument(span.clone())
         .await?;
     }
 

@@ -25,3 +25,4 @@ tower-http         = { version = "0.6.6", features = ["trace"] }
 tracing            = "0.1.41"
 tracing-error = "0.2.1"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+venator = "1.1.0"
