@@ -1,5 +1,4 @@
 use std::{
-    cmp::Ordering,
     collections::HashMap,
     fs::File,
     io::BufReader,
@@ -10,15 +9,15 @@ use std::{
 use color_eyre::eyre::{Context, eyre};
 use google_youtube3::{
     YouTube,
-    api::{PlaylistItem, PlaylistItemContentDetails, PlaylistItemSnippet, ResourceId},
+    api::{PlaylistItem, PlaylistItemSnippet, ResourceId},
     yup_oauth2::{self, ConsoleApplicationSecret},
 };
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
-use jiff::{Span, SpanCompare, Unit};
+use jiff::Unit;
 use tokio::{sync::mpsc::Receiver, try_join};
 use tower::ServiceBuilder;
-use tracing::{Instrument, debug, trace_span};
+use tracing::{Instrument, debug, trace, trace_span, warn};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
@@ -65,9 +64,9 @@ async fn main() -> color_eyre::Result<()> {
         .https_only(true)
         .connector_layer(
             ServiceBuilder::new()
+                .concurrency_limit(10)
                 .buffer(1024)
-                .rate_limit(5, Duration::from_secs(10)) // TODO: does this mean 5 sets of 10?
-                .concurrency_limit(10),
+                .rate_limit(5, Duration::from_secs(10)), // TODO: does this mean 5 sets of 10?
         )
         .build()
         .wrap_err("Unable to setup reqwest client")?;
@@ -116,77 +115,67 @@ async fn main() -> color_eyre::Result<()> {
     // TODO: should these be actors/tasks? the reciever is basically already one
     try_join!(
         youtube_pubsub_reciever(new_video_sender, subscriptions.clone()),
-        youtube_playlist_modifier(&client, youtube.clone(), playlist_id, new_video_reciever),
+        youtube_playlist_modifier(youtube.clone(), playlist_id, new_video_reciever),
         youtube_pubsub_subscription_manager(&client, youtube, &subscriptions)
     )
     .map(|_| ())
 }
 
 async fn youtube_playlist_modifier(
-    http_client: &reqwest::Client,
     youtube: YouTube<HttpsConnector<HttpConnector>>,
     playlist_id: String,
     mut reciever: Receiver<Feed>,
 ) -> color_eyre::Result<()> {
-    while let Some(Feed {
-        title,
-        updated,
-        ref entry,
-        ..
-    }) = reciever.recv().await
-    {
+    while let Some(Feed { ref entry, .. }) = reciever.recv().await {
         async {
             debug!("validating new subscription");
-            // TODO: verify that it is not a short, and it is a new upload, not a modified old one
 
-            // let updated_before_publish = entry.published >= entry.updated;
-            let published_within_one_hour_of_feed_update = (updated - entry.published)
-                .total((Unit::Hour, updated))
-                .unwrap()
-                <= 1.0;
+            let video_age_minutes = (entry.updated - entry.published)
+                .total((Unit::Minute, entry.updated))
+                .unwrap();
 
-            dbg!(published_within_one_hour_of_feed_update);
+            match video_age_minutes {
+                ..=1.0 => {
+                    // TODO: duplicate detection
+                    // TODO: shorts detection
+                    debug!(%video_age_minutes, "inserting new subscription");
 
-            debug!("inserting new subscription");
-
-            youtube
-                .playlist_items()
-                .insert(PlaylistItem {
-                    snippet: Some(PlaylistItemSnippet {
-                        playlist_id: Some(playlist_id.clone()),
-                        resource_id: Some(ResourceId {
-                            kind: Some("youtube#video".into()),
-                            video_id: Some(entry.video_id.clone()),
+                    youtube
+                        .playlist_items()
+                        .insert(PlaylistItem {
+                            snippet: Some(PlaylistItemSnippet {
+                                playlist_id: Some(playlist_id.clone()),
+                                resource_id: Some(ResourceId {
+                                    kind: Some("youtube#video".into()),
+                                    video_id: Some(entry.video_id.clone()),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            }),
                             ..Default::default()
-                        }),
-                        // position: todo!(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                })
-                .doit()
-                .await
-                .wrap_err("failed to insert playlist item")
+                        })
+                        .doit()
+                        .await
+                        .map(|_| ())
+                        .wrap_err("failed to insert playlist item")
+                }
+                _ => {
+                    trace!(%video_age_minutes, "ignoring updated old video");
+
+                    Ok(())
+                }
+            }
         }
         .instrument(trace_span!(
-            "new_video",
+            "new_feed_item",
+            updated = %entry.updated,
+            published = %entry.published,
             video_id = entry.video_id,
             channel_id = entry.channel_id,
             title = entry.title
         ))
         .await?;
     }
-
-    // let (response, playlist_items) = youtube
-    //     .playlist_items()
-    //     .list(&vec!["snippet".into(), "contentDetails".into()])
-    //     .max_results(10)
-    //     .playlist_id(&playlist_id)
-    //     .doit()
-    //     .await
-    //     .wrap_err("failed to fetch playlist information")?;
-
-    // dbg!(playlist_items);
 
     Ok(())
 }

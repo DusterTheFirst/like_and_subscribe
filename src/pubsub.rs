@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    process::exit,
     str::FromStr as _,
     sync::{Arc, Mutex},
     time::Duration,
@@ -21,11 +20,7 @@ use google_youtube3::{
 };
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
-use jiff::{
-    Span, Timestamp, Zoned,
-    civil::{Date, DateTime},
-    tz::TimeZone,
-};
+use jiff::{Span, Timestamp, Zoned, tz::TimeZone};
 use mime::Mime;
 use quick_xml::DeError;
 use reqwest::{StatusCode, header};
@@ -361,14 +356,43 @@ pub async fn youtube_pubsub_subscription_manager(
             }
         }
 
-        async fn update_subscriptions(client: &reqwest::Client, mode: Mode, iter: Vec<String>) {
-            let mut set = iter
-                .into_iter().map(|channel_id| {
-                    let client = client.clone();
-                    let channel_id2 = channel_id.clone();
-                    async move {
-                        info!("begin");
+        // Prune stale entries
+        {
+            let mut action_queue = subscriptions
+                .lock()
+                .unwrap()
+                .extract_if(|_, sub| sub.stale)
+                .inspect(|(channel_id, sub)| {
+                    debug!(?channel_id, name = sub.name, "removing stale subscription");
+                })
+                .map(|x| (Mode::Unsubscribe, x))
+                .collect::<Vec<_>>();
 
+            action_queue.extend(
+                subscriptions
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(_, s)| match s.subscription_expiration.as_ref() {
+                        Some(expiration) => {
+                            let now = Zoned::now();
+
+                            // re-subscribe if expring in a day
+                            expiration.duration_since(&now)
+                                <= Span::new().days(1).to_duration(&now).unwrap()
+                        }
+                        None => true,
+                    })
+                    .map(|(a, b)| (Mode::Subscribe, (a.clone(), b.clone()))),
+            );
+
+            let mut set = action_queue
+                .into_iter().map(|(mode, (channel_id, YoutubeChannelSubscription { name, .. }))| {
+                    let client = client.clone();
+
+                    let span = trace_span!("subscription_update", channel_id, name, ?mode);
+
+                    async move {
                         let request = client
                             .post("https://pubsubhubbub.appspot.com/subscribe")
                             .form(&HubRequest {
@@ -395,58 +419,20 @@ pub async fn youtube_pubsub_subscription_manager(
                         if response.status() == StatusCode::TOO_MANY_REQUESTS {
                             // TODO: retries from too many requests
                             error!("too many requests");
-                            exit(1);
                             todo!();
                         }
 
                         if !response.status().is_success() {
                             let status_code = response.status().as_u16();
                             warn!(status_code, "server returned error");
-                            return;
                         }
-
-                        info!("success");
                     }
-                    .instrument(trace_span!("subscription_update", channel_id = channel_id2, ?mode))
+                    .instrument(span)
                 })
                 .collect::<JoinSet<_>>();
 
             while set.join_next().await.is_some() {}
         }
-
-        // Prune stale entries
-        update_subscriptions(client, Mode::Unsubscribe, {
-            let mut subscriptions = subscriptions.lock().unwrap();
-
-            subscriptions
-                .extract_if(|_, sub| sub.stale)
-                .inspect(|(channel_id, sub)| {
-                    debug!(?channel_id, name = sub.name, "removing stale subscription");
-                })
-                .map(|(id, _)| id)
-                .collect::<Vec<_>>()
-        })
-        .await;
-
-        update_subscriptions(client, Mode::Subscribe, {
-            let subscriptions = subscriptions.lock().unwrap();
-
-            subscriptions
-                .iter()
-                .filter(|(_, s)| match s.subscription_expiration.as_ref() {
-                    Some(expiration) => {
-                        let now = Zoned::now();
-
-                        // re-subscribe if expring in a day
-                        expiration.duration_since(&now)
-                            <= Span::new().days(1).to_duration(&now).unwrap()
-                    }
-                    None => true,
-                })
-                .map(|(id, _)| id.clone())
-                .collect::<Vec<_>>()
-        })
-        .await;
 
         let subscriptions = subscriptions.lock().unwrap();
         let total_count = subscriptions.len();
@@ -463,7 +449,7 @@ pub async fn youtube_pubsub_subscription_manager(
 
         info!(
             total_count,
-            stale_count, subscribed_count, soonest_expiration, "subscription update finish"
+            stale_count, subscribed_count, soonest_expiration, "subscription update end"
         );
     }
 }

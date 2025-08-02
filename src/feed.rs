@@ -20,8 +20,6 @@ pub struct Feed {
     _namespace: MustBe!("http://www.w3.org/2005/Atom"),
     #[serde(rename = "@xmlns:yt")]
     _namespace_yt: MustBe!("http://www.youtube.com/xml/schemas/2015"),
-    pub title: String,
-    pub updated: DateTime,
     pub entry: Entry,
 }
 
