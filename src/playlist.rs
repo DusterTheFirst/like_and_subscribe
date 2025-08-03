@@ -1,4 +1,9 @@
-use color_eyre::eyre::Context;
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    sync::Mutex,
+};
+
+use futures::{StreamExt, stream};
 use google_youtube3::{
     YouTube,
     api::{PlaylistItem, PlaylistItemSnippet, ResourceId},
@@ -7,62 +12,120 @@ use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use jiff::Unit;
 use tokio::sync::mpsc::Receiver;
-use tracing::{Instrument, debug, trace};
+use tracing::{Instrument, debug, error, trace, warn};
 
-use crate::feed::Feed;
+use crate::{feed::Feed, subscription::YoutubeChannelSubscription};
 
 pub async fn youtube_playlist_modifier(
     youtube: YouTube<HttpsConnector<HttpConnector>>,
-    playlist_id: String,
+    subscriptions: &Mutex<HashMap<String, YoutubeChannelSubscription>>,
+    playlist_id: &str,
     mut reciever: Receiver<(tracing::Span, Feed)>,
 ) -> color_eyre::Result<()> {
-    while let Some((span, Feed { ref entry, .. })) = reciever.recv().await {
-        async {
-            debug!("validating new feed item");
+    stream::poll_fn(|cx| reciever.poll_recv(cx))
+        .for_each_concurrent(10, |(span, Feed { entry, .. })| {
+            let youtube = youtube.clone();
+            let span2 = span.clone();
 
-            let video_age_minutes = (entry.updated - entry.published)
-                .total((Unit::Minute, entry.updated))
-                .unwrap();
+            async move {
+                debug!("validating new feed item");
 
-            span.record("video_age_minutes", video_age_minutes);
+                match subscriptions
+                    .lock()
+                    .unwrap()
+                    .entry(entry.channel_id.clone())
+                {
+                    Entry::Occupied(_) => {}
+                    Entry::Vacant(vacant_entry) => {
+                        // Queue for unsubscription
+                        // TODO: just unsubscribe here?
+                        vacant_entry.insert(YoutubeChannelSubscription {
+                            name: String::new(),
+                            subscription_expiration: None,
+                            stale: true,
+                        });
+                        warn!(
+                            channel_id = entry.channel_id,
+                            "feed item had unknown channel"
+                        );
+                        return;
+                    }
+                }
 
-            match video_age_minutes {
-                ..=1.0 => {
-                    // TODO: duplicate detection
-                    // TODO: shorts detection
-                    debug!("inserting new video");
-                    span.record("inserted", true);
+                let video_age_minutes = (entry.updated - entry.published)
+                    .total((Unit::Minute, entry.updated))
+                    .unwrap();
 
-                    youtube
-                        .playlist_items()
-                        .insert(PlaylistItem {
-                            snippet: Some(PlaylistItemSnippet {
-                                playlist_id: Some(playlist_id.clone()),
-                                resource_id: Some(ResourceId {
-                                    kind: Some("youtube#video".into()),
-                                    video_id: Some(entry.video_id.clone()),
-                                    ..Default::default()
-                                }),
+                span.record("video_age_minutes", video_age_minutes);
+
+                if video_age_minutes > 1.0 {
+                    trace!("ignoring updated old video");
+                    span.record("inserted", false);
+                    return;
+                }
+                span.record("inserted", true);
+
+                // TODO: shorts detection: https://issuetracker.google.com/issues/232112727
+                // Check if the video is a short
+                // youtube.videos().list(vec![""])
+
+                // Duplicate detection
+                let result = youtube
+                    .playlist_items()
+                    .list(&vec!["contentDetails".to_string()])
+                    .playlist_id(playlist_id)
+                    .video_id(&entry.video_id)
+                    .doit()
+                    .await;
+
+                match result {
+                    Ok((_, items)) => {
+                        let item_exists = items.items.into_iter().flatten().any(|i| {
+                            i.content_details.as_ref().and_then(|d| d.video_id.as_ref())
+                                == Some(&entry.video_id)
+                        });
+
+                        if item_exists {
+                            warn!("video exists in playlist already, skipping");
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        warn!(%error, "failed to check if video exists in playlist already");
+                    }
+                }
+
+                debug!("inserting new video");
+
+                let result = youtube
+                    .playlist_items()
+                    .insert(PlaylistItem {
+                        snippet: Some(PlaylistItemSnippet {
+                            playlist_id: Some(playlist_id.to_string()),
+                            resource_id: Some(ResourceId {
+                                kind: Some("youtube#video".into()),
+                                video_id: Some(entry.video_id.clone()),
                                 ..Default::default()
                             }),
                             ..Default::default()
-                        })
-                        .doit()
-                        .await
-                        .map(|_| ())
-                        .wrap_err("failed to insert playlist item")
-                }
-                _ => {
-                    trace!("ignoring updated old video");
-                    span.record("inserted", false);
+                        }),
+                        ..Default::default()
+                    })
+                    .doit()
+                    .await;
 
-                    Ok(())
+                match result {
+                    Ok(_) => {
+                        debug!("video inserted");
+                    }
+                    Err(error) => {
+                        error!(%error, "failed to insert video");
+                    }
                 }
             }
-        }
-        .instrument(span.clone())
-        .await?;
-    }
+            .instrument(span2)
+        })
+        .await;
 
     Ok(())
 }

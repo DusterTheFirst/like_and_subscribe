@@ -57,7 +57,6 @@ async fn main() -> color_eyre::Result<()> {
     let playlist_id = std::env::var("YOUTUBE_PLAYLIST_ID")
         .wrap_err("Unable to read YOUTUBE_PLAYLIST_ID env var")?;
 
-    // TODO: make sure using gzip (or other compression)
     let client = reqwest::ClientBuilder::new()
         .https_only(true)
         .connector_layer(
@@ -113,7 +112,12 @@ async fn main() -> color_eyre::Result<()> {
     // TODO: should these be actors/tasks? the reciever is basically already one
     try_join!(
         youtube_pubsub_reciever(new_video_sender, subscriptions.clone()),
-        youtube_playlist_modifier(youtube.clone(), playlist_id, new_video_reciever),
+        youtube_playlist_modifier(
+            youtube.clone(),
+            &subscriptions,
+            &playlist_id,
+            new_video_reciever
+        ),
         youtube_subscription_manager(&client, youtube, &subscriptions)
     )
     .map(|_| ())

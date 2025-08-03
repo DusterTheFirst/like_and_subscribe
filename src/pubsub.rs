@@ -35,7 +35,6 @@ pub enum HubChallenge {
     Unsubscribe(HubUnsubscribeChallenge),
 }
 
-// TODO: unsubscribe on shutdown???
 #[derive(Debug, Deserialize)]
 pub struct HubSubscribeChallenge {
     #[serde(rename = "hub.topic")]
@@ -179,8 +178,6 @@ async fn pubsub_new_upload(
 
     // TODO: verify remote IP, user agent and others??
     // tokio::net::lookup_host("pubsubhubbub.appspot.com").await
-
-    // TODO: unsubscribe if not in current subscriptions
 
     let feed = match quick_xml::de::from_str::<Feed>(&body) {
         Ok(feed) => feed,

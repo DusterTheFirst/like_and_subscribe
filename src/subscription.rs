@@ -4,8 +4,9 @@ use std::{
     time::Duration,
 };
 
-use axum::http::HeaderValue;
+use axum::http::{HeaderMap, HeaderValue};
 use color_eyre::eyre::{Context as _, eyre};
+use futures::{StreamExt, stream};
 use google_youtube3::{
     YouTube,
     api::{Scope, SubscriptionListResponse},
@@ -15,7 +16,6 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use jiff::{Span, Zoned};
 use reqwest::{StatusCode, header};
 use serde::{Deserialize, Serialize};
-use tokio::task::JoinSet;
 use tracing::{Instrument, debug, error, info, trace, trace_span, warn};
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
@@ -80,88 +80,7 @@ pub async fn youtube_subscription_manager(
             .values_mut()
             .for_each(|s| s.stale = true);
 
-        let mut page_token = None;
-        let url = "https://www.googleapis.com/youtube/v3/subscriptions?part=snippet,contentDetails&mine=true&maxResults=50";
-
-        // Pagination handling
-        loop {
-            let url = if let Some(page_token) = &page_token {
-                format!("{url}&pageToken={page_token}")
-            } else {
-                url.to_string()
-            };
-
-            let response = client
-                .get(url)
-                .bearer_auth(&token)
-                .headers(
-                    [last_etag.as_ref().map(|etag| {
-                        (header::IF_NONE_MATCH, HeaderValue::from_str(etag).unwrap())
-                    })]
-                    .into_iter()
-                    .flatten()
-                    .collect(),
-                )
-                .send()
-                .await
-                .unwrap();
-
-            if response.status() == StatusCode::NOT_MODIFIED {
-                info!("not changed");
-
-                // Mark all existing subscriptions as not stale
-                subscriptions
-                    .lock()
-                    .unwrap()
-                    .values_mut()
-                    .for_each(|s| s.stale = false);
-
-                break;
-            }
-
-            // TODO: check for error response too
-
-            let json = response.json::<SubscriptionListResponse>().await.unwrap();
-
-            info!(json.etag, json.next_page_token);
-
-            if page_token.is_none() {
-                last_etag = json.etag;
-            }
-
-            let items = json.items.unwrap();
-
-            let mut subscriptions = subscriptions.lock().unwrap();
-            for subscription in items {
-                let snippet = subscription.snippet.unwrap();
-                let resource = snippet.resource_id.unwrap();
-
-                assert_eq!(resource.kind.as_deref(), Some("youtube#channel"));
-
-                let channel_id = resource.channel_id.unwrap();
-                let channel_name = snippet.title.unwrap();
-
-                // Either add item or mark as fresh
-                match subscriptions.entry(channel_id.clone()) {
-                    Entry::Occupied(mut occupied_entry) => {
-                        occupied_entry.get_mut().stale = false;
-                    }
-                    Entry::Vacant(vacant_entry) => {
-                        vacant_entry.insert(YoutubeChannelSubscription {
-                            name: channel_name,
-                            subscription_expiration: None,
-                            stale: false,
-                        });
-                    }
-                }
-            }
-
-            page_token = json.next_page_token;
-
-            if page_token.is_none() {
-                break;
-            }
-        }
+        get_all_subscriptions(client, subscriptions, &mut last_etag, token).await;
 
         // Prune stale entries
         {
@@ -193,12 +112,12 @@ pub async fn youtube_subscription_manager(
                     .map(|(a, b)| (Mode::Subscribe, (a.clone(), b.clone()))),
             );
 
-            let mut set = action_queue
-                .into_iter().map(|(mode, (channel_id, YoutubeChannelSubscription { name, .. }))| {
+            stream::iter(action_queue).for_each_concurrent(10, |(mode, (channel_id, YoutubeChannelSubscription { name, .. }))| {
                     let client = client.clone();
 
                     let span = trace_span!("subscription_update", channel_id, name, ?mode);
 
+                    // TODO: make this a function?
                     async move {
                         let request = client
                             .post("https://pubsubhubbub.appspot.com/subscribe")
@@ -226,7 +145,7 @@ pub async fn youtube_subscription_manager(
                         if response.status() == StatusCode::TOO_MANY_REQUESTS {
                             // TODO: retries from too many requests
                             error!("too many requests");
-                            todo!();
+                            return;
                         }
 
                         if !response.status().is_success() {
@@ -238,10 +157,7 @@ pub async fn youtube_subscription_manager(
                         trace!("end")
                     }
                     .instrument(span)
-                })
-                .collect::<JoinSet<_>>();
-
-            while set.join_next().await.is_some() {}
+                }).await;
         }
 
         let subscriptions = subscriptions.lock().unwrap();
@@ -261,5 +177,101 @@ pub async fn youtube_subscription_manager(
             total_count,
             stale_count, subscribed_count, soonest_expiration, "subscription update end"
         );
+    }
+}
+
+async fn get_all_subscriptions(
+    client: &reqwest::Client,
+    subscriptions: &Mutex<HashMap<String, YoutubeChannelSubscription>>,
+    last_etag: &mut Option<String>,
+    token: String,
+) {
+    let mut page_token = None;
+    let url = "https://www.googleapis.com/youtube/v3/subscriptions?part=snippet,contentDetails&mine=true&maxResults=50";
+
+    // Pagination handling
+    loop {
+        let url = if let Some(page_token) = &page_token {
+            format!("{url}&pageToken={page_token}")
+        } else {
+            url.to_string()
+        };
+
+        let headers = if let Some(etag) = last_etag {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::IF_NONE_MATCH, HeaderValue::from_str(etag).unwrap());
+            headers
+        } else {
+            HeaderMap::new()
+        };
+
+        let response = client
+            .get(url)
+            .bearer_auth(&token)
+            .headers(headers)
+            .send()
+            .await
+            .unwrap();
+
+        let status = response.status();
+
+        if status == StatusCode::NOT_MODIFIED {
+            info!("not changed");
+
+            // Mark all existing subscriptions as not stale
+            subscriptions
+                .lock()
+                .unwrap()
+                .values_mut()
+                .for_each(|s| s.stale = false);
+
+            break;
+        }
+
+        if !status.is_success() {
+            warn!(status=%status, status_message=status.canonical_reason(), "failed to paginate all subscriptions");
+            break;
+        }
+
+        let json = response.json::<SubscriptionListResponse>().await.unwrap();
+
+        info!(json.etag, json.next_page_token);
+
+        if page_token.is_none() {
+            *last_etag = json.etag;
+        }
+
+        let items = json.items.unwrap();
+
+        let mut subscriptions = subscriptions.lock().unwrap();
+        for subscription in items {
+            let snippet = subscription.snippet.unwrap();
+            let resource = snippet.resource_id.unwrap();
+
+            assert_eq!(resource.kind.as_deref(), Some("youtube#channel"));
+
+            let channel_id = resource.channel_id.unwrap();
+            let channel_name = snippet.title.unwrap();
+
+            // Either add item or mark as fresh
+            match subscriptions.entry(channel_id.clone()) {
+                Entry::Occupied(mut occupied_entry) => {
+                    occupied_entry.get_mut().stale = false;
+                }
+                Entry::Vacant(vacant_entry) => {
+                    vacant_entry.insert(YoutubeChannelSubscription {
+                        name: channel_name,
+                        subscription_expiration: None,
+                        stale: false,
+                    });
+                }
+            }
+        }
+
+        page_token = json.next_page_token;
+
+        if page_token.is_none() {
+            break;
+        }
     }
 }
