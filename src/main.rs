@@ -11,11 +11,12 @@ use google_youtube3::{
     YouTube,
     yup_oauth2::{self, ConsoleApplicationSecret},
 };
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use tokio::try_join;
 use tower::ServiceBuilder;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
-use venator::Venator;
 
 use crate::{
     playlist::youtube_playlist_modifier,
@@ -32,11 +33,20 @@ pub mod subscription;
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
+    let opentelemetry_provider = SdkTracerProvider::builder()
+        .with_batch_exporter(
+            opentelemetry_otlp::SpanExporter::builder()
+                .with_tonic()
+                .build()
+                .expect("otlp span exporter should be correctly configured"),
+        )
+        .build();
+
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
+        .with(tracing_opentelemetry::layer().with_tracer(opentelemetry_provider.tracer("tracing")))
         .with(ErrorLayer::default())
         .with(EnvFilter::from_default_env())
-        .with(Venator::builder().build())
         .init();
 
     tracing::trace!("a");
