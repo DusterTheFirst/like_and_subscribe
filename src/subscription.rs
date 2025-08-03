@@ -65,118 +65,120 @@ pub async fn youtube_subscription_manager(
     loop {
         ticker.tick().await;
 
-        let token = youtube
-            .auth
-            .get_token(&[Scope::Readonly.as_ref()])
-            .await
-            .map_err(|e| eyre!("{e}"))
-            .wrap_err("unable to get authentication token")?
-            .unwrap(); // TODO: FIXME: remove unwrap
+        async {
+            let token = youtube
+                .auth
+                .get_token(&[Scope::Readonly.as_ref()])
+                .await
+                .map_err(|e| eyre!("{e}"))
+                .wrap_err("unable to get authentication token").unwrap()
+                .unwrap(); // TODO: FIXME: remove unwrap
 
-        // Mark all existing subscriptions stale
-        subscriptions
-            .lock()
-            .unwrap()
-            .values_mut()
-            .for_each(|s| s.stale = true);
-
-        get_all_subscriptions(client, subscriptions, &mut last_etag, token).await;
-
-        // Prune stale entries
-        {
-            let mut action_queue = subscriptions
+            // Mark all existing subscriptions stale
+            subscriptions
                 .lock()
                 .unwrap()
-                .extract_if(|_, sub| sub.stale)
-                .inspect(|(channel_id, sub)| {
-                    debug!(?channel_id, name = sub.name, "removing stale subscription");
-                })
-                .map(|x| (Mode::Unsubscribe, x))
-                .collect::<Vec<_>>();
+                .values_mut()
+                .for_each(|s| s.stale = true);
 
-            action_queue.extend(
-                subscriptions
+            get_all_subscriptions(client, subscriptions, &mut last_etag, token).await;
+
+            // Prune stale entries
+            {
+                let mut action_queue = subscriptions
                     .lock()
                     .unwrap()
-                    .iter()
-                    .filter(|(_, s)| match s.subscription_expiration.as_ref() {
-                        Some(expiration) => {
-                            let now = Zoned::now();
-
-                            // re-subscribe if expring in a day
-                            expiration.duration_since(&now)
-                                <= Span::new().days(1).to_duration(&now).unwrap()
-                        }
-                        None => true,
+                    .extract_if(|_, sub| sub.stale)
+                    .inspect(|(channel_id, sub)| {
+                        debug!(?channel_id, name = sub.name, "removing stale subscription");
                     })
-                    .map(|(a, b)| (Mode::Subscribe, (a.clone(), b.clone()))),
-            );
+                    .map(|x| (Mode::Unsubscribe, x))
+                    .collect::<Vec<_>>();
 
-            stream::iter(action_queue).for_each_concurrent(10, |(mode, (channel_id, YoutubeChannelSubscription { name, .. }))| {
-                    let client = client.clone();
+                action_queue.extend(
+                    subscriptions
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|(_, s)| match s.subscription_expiration.as_ref() {
+                            Some(expiration) => {
+                                let now = Zoned::now();
 
-                    let span = trace_span!("subscription_update", channel_id, name, ?mode);
+                                // re-subscribe if expring in a day
+                                expiration.duration_since(&now)
+                                    <= Span::new().days(1).to_duration(&now).unwrap()
+                            }
+                            None => true,
+                        })
+                        .map(|(a, b)| (Mode::Subscribe, (a.clone(), b.clone()))),
+                );
 
-                    // TODO: make this a function?
-                    async move {
-                        let request = client
-                            .post("https://pubsubhubbub.appspot.com/subscribe")
-                            .form(&HubRequest {
-                                mode,
-                                verify: Verify::Synchronous,
-                                callback: "https://lenovo-fedora.taila5e2a.ts.net/pubsub",
-                                topic: format!(
-                                    "https://www.youtube.com/xml/feeds/videos.xml?channel_id={channel_id}"
-                                ),
-                            })
-                            .build()
-                            .expect("request should be well formed");
+                stream::iter(action_queue).for_each_concurrent(10, |(mode, (channel_id, YoutubeChannelSubscription { name, .. }))| {
+                        let client = client.clone();
 
-                        let response = match client.execute(request).await {
-                            Ok(response) => response,
-                            Err(error) => {
-                                // TODO: implement retries? put back on the queue?
-                                // TODO: keep track of subscribed channels?? how do we know whats new?
-                                warn!(%error, "failed to subscribe to a youtube channel");
+                        let span = trace_span!("subscription_update", channel_id, name, ?mode);
+
+                        // TODO: make this a function?
+                        async move {
+                            let request = client
+                                .post("https://pubsubhubbub.appspot.com/subscribe")
+                                .form(&HubRequest {
+                                    mode,
+                                    verify: Verify::Synchronous,
+                                    callback: "https://lenovo-fedora.taila5e2a.ts.net/pubsub",
+                                    topic: format!(
+                                        "https://www.youtube.com/xml/feeds/videos.xml?channel_id={channel_id}"
+                                    ),
+                                })
+                                .build()
+                                .expect("request should be well formed");
+
+                            let response = match client.execute(request).await {
+                                Ok(response) => response,
+                                Err(error) => {
+                                    // TODO: implement retries? put back on the queue?
+                                    // TODO: keep track of subscribed channels?? how do we know whats new?
+                                    warn!(%error, "failed to subscribe to a youtube channel");
+                                    return;
+                                }
+                            };
+
+                            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                                // TODO: retries from too many requests
+                                error!("too many requests");
                                 return;
                             }
-                        };
 
-                        if response.status() == StatusCode::TOO_MANY_REQUESTS {
-                            // TODO: retries from too many requests
-                            error!("too many requests");
-                            return;
+                            if !response.status().is_success() {
+                                let status_code = response.status().as_u16();
+                                warn!(status_code, "server returned error");
+                                return;
+                            }
+
+                            trace!("end")
                         }
+                        .instrument(span)
+                    }).await;
+            }
 
-                        if !response.status().is_success() {
-                            let status_code = response.status().as_u16();
-                            warn!(status_code, "server returned error");
-                            return;
-                        }
+            let subscriptions = subscriptions.lock().unwrap();
+            let total_count = subscriptions.len();
+            let stale_count = subscriptions.values().filter(|s| s.stale).count();
+            let subscribed_count = subscriptions
+                .values()
+                .filter(|s| s.subscription_expiration.is_some())
+                .count();
+            let soonest_expiration = subscriptions
+                .values()
+                .flat_map(|s| s.subscription_expiration.as_ref())
+                .max()
+                .map(|exp| exp.to_string());
 
-                        trace!("end")
-                    }
-                    .instrument(span)
-                }).await;
-        }
-
-        let subscriptions = subscriptions.lock().unwrap();
-        let total_count = subscriptions.len();
-        let stale_count = subscriptions.values().filter(|s| s.stale).count();
-        let subscribed_count = subscriptions
-            .values()
-            .filter(|s| s.subscription_expiration.is_some())
-            .count();
-        let soonest_expiration = subscriptions
-            .values()
-            .flat_map(|s| s.subscription_expiration.as_ref())
-            .max()
-            .map(|exp| exp.to_string());
-
-        info!(
-            total_count,
-            stale_count, subscribed_count, soonest_expiration, "subscription update end"
-        );
+            info!(
+                total_count,
+                stale_count, subscribed_count, soonest_expiration, "subscription update end"
+            );
+        }.instrument(trace_span!("subscription_manage")).await
     }
 }
 
