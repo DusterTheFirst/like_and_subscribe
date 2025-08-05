@@ -26,11 +26,11 @@ pub enum Mode {
 }
 
 #[derive(Debug, Serialize)]
-pub struct HubRequest {
+pub struct HubRequest<'s> {
     #[serde(rename = "hub.topic")]
     pub(crate) topic: String,
     #[serde(rename = "hub.callback")]
-    pub(crate) callback: &'static str,
+    pub(crate) callback: &'s str,
     #[serde(rename = "hub.mode")]
     pub(crate) mode: Mode,
     #[serde(rename = "hub.verify")]
@@ -53,11 +53,14 @@ pub struct YoutubeChannelSubscription {
 }
 
 pub async fn youtube_subscription_manager(
+    hostname: String,
     client: &reqwest::Client,
     youtube: YouTube<HttpsConnector<HttpConnector>>,
     subscriptions: &Mutex<HashMap<String, YoutubeChannelSubscription>>,
 ) -> color_eyre::Result<()> {
     let mut last_etag: Option<String> = None;
+
+    let callback = &format!("https://{hostname}/pubsub");
 
     let mut ticker = tokio::time::interval(Duration::from_secs(60 * 60)); // One hour
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -124,8 +127,8 @@ pub async fn youtube_subscription_manager(
                                 .post("https://pubsubhubbub.appspot.com/subscribe")
                                 .form(&HubRequest {
                                     mode,
+                                    callback,
                                     verify: Verify::Synchronous,
-                                    callback: "https://lenovo-fedora.taila5e2a.ts.net/pubsub",
                                     topic: format!(
                                         "https://www.youtube.com/xml/feeds/videos.xml?channel_id={channel_id}"
                                     ),

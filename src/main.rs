@@ -67,6 +67,9 @@ async fn main() -> color_eyre::Result<()> {
     let playlist_id = std::env::var("YOUTUBE_PLAYLIST_ID")
         .wrap_err("Unable to read YOUTUBE_PLAYLIST_ID env var")?;
 
+    let hostname =
+        std::env::var("PUBSUB_HOSTNAME").wrap_err("Unable to read PUBSUB_HOSTNAME env var")?;
+
     let client = reqwest::ClientBuilder::new()
         .https_only(true)
         .connector_layer(
@@ -128,7 +131,7 @@ async fn main() -> color_eyre::Result<()> {
             &playlist_id,
             new_video_reciever
         ),
-        youtube_subscription_manager(&client, youtube, &subscriptions)
+        youtube_subscription_manager(hostname, &client, youtube, &subscriptions)
     )
     .map(|_| ())
 }

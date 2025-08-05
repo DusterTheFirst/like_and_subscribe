@@ -1,0 +1,13 @@
+[Unit]
+Description="Like and Subscribe worker"
+Requires=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/root/like_and_subscribe.env
+WorkingDirectory=/root
+ExecStart=/root/like_and_subscribe
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
