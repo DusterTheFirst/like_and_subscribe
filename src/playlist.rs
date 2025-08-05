@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use futures::{StreamExt, stream};
@@ -17,14 +17,18 @@ use tracing::{Instrument, debug, error, trace, warn};
 use crate::{feed::Feed, subscription::YoutubeChannelSubscription};
 
 pub async fn youtube_playlist_modifier(
+    mut shutdown: tokio::sync::broadcast::Receiver<()>,
     youtube: YouTube<HttpsConnector<HttpConnector>>,
-    subscriptions: &Mutex<HashMap<String, YoutubeChannelSubscription>>,
-    playlist_id: &str,
+    subscriptions: Arc<Mutex<HashMap<String, YoutubeChannelSubscription>>>,
+    playlist_id: Arc<str>,
     mut reciever: Receiver<(tracing::Span, Feed)>,
-) -> color_eyre::Result<()> {
-    stream::poll_fn(|cx| reciever.poll_recv(cx))
-        .for_each_concurrent(10, |(span, Feed { entry, .. })| {
+) {
+    let stream_processing = stream::poll_fn(|cx| reciever.poll_recv(cx)).for_each_concurrent(
+        10,
+        |(span, Feed { entry, .. })| {
             let youtube = youtube.clone();
+            let subscriptions = subscriptions.as_ref();
+            let playlist_id = playlist_id.as_ref();
             let span2 = span.clone();
 
             async move {
@@ -35,7 +39,9 @@ pub async fn youtube_playlist_modifier(
                     .unwrap()
                     .entry(entry.channel_id.clone())
                 {
-                    Entry::Occupied(_) => {}
+                    Entry::Occupied(occupied_entry) => {
+                        span.record("channel_name", &occupied_entry.get().name);
+                    }
                     Entry::Vacant(vacant_entry) => {
                         // Queue for unsubscription
                         // TODO: just unsubscribe here?
@@ -50,7 +56,7 @@ pub async fn youtube_playlist_modifier(
                         );
                         return;
                     }
-                }
+                };
 
                 let video_age_minutes = (entry.updated - entry.published)
                     .total((Unit::Minute, entry.updated))
@@ -63,11 +69,40 @@ pub async fn youtube_playlist_modifier(
                     span.record("inserted", false);
                     return;
                 }
-                span.record("inserted", true);
 
                 // TODO: shorts detection: https://issuetracker.google.com/issues/232112727
                 // Check if the video is a short
-                // youtube.videos().list(vec![""])
+                let result = youtube
+                    .videos()
+                    .list(&vec!["contentDetails".into(), "player".into()])
+                    .add_id(&entry.video_id)
+                    .doit()
+                    .await;
+
+                match result {
+                    Ok((_, items)) => {
+                        let video = items
+                            .items
+                            .iter()
+                            .flatten()
+                            .next()
+                            .expect("exactly one entry should be returned");
+
+                        let embed = video.player.as_ref().unwrap().embed_html.as_ref().unwrap();
+                        let is_short = embed.contains("youtube.com/shorts/");
+
+                        if is_short {
+                            debug!(%embed, "ignoring shorts video");
+                            span.record("inserted", false);
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        warn!(%error, "failed to check if video is a short");
+                    }
+                }
+
+                span.record("inserted", true);
 
                 // Duplicate detection
                 let result = youtube
@@ -124,8 +159,11 @@ pub async fn youtube_playlist_modifier(
                 }
             }
             .instrument(span2)
-        })
-        .await;
+        },
+    );
 
-    Ok(())
+    tokio::select! {
+        _  = stream_processing => tracing::info!("stream processing task exited"),
+        _ = shutdown.recv() => tracing::info!("stream processing task shutting down"),
+    };
 }

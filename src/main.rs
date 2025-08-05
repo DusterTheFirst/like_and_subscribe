@@ -13,7 +13,6 @@ use google_youtube3::{
 };
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use tokio::try_join;
 use tower::ServiceBuilder;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
@@ -122,16 +121,37 @@ async fn main() -> color_eyre::Result<()> {
         HashMap::<String, YoutubeChannelSubscription>::new(),
     ));
 
-    // TODO: should these be actors/tasks? the reciever is basically already one
-    try_join!(
-        youtube_pubsub_reciever(new_video_sender, subscriptions.clone()),
-        youtube_playlist_modifier(
-            youtube.clone(),
-            &subscriptions,
-            &playlist_id,
-            new_video_reciever
-        ),
-        youtube_subscription_manager(hostname, &client, youtube, &subscriptions)
-    )
-    .map(|_| ())
+    let (shutdown, _) = tokio::sync::broadcast::channel(1);
+
+    let mut pubsub_task = tokio::spawn(youtube_pubsub_reciever(
+        shutdown.subscribe(),
+        new_video_sender,
+        subscriptions.clone(),
+    ));
+    let mut playlist_task = tokio::spawn(youtube_playlist_modifier(
+        shutdown.subscribe(),
+        youtube.clone(),
+        subscriptions.clone(),
+        Arc::from(playlist_id),
+        new_video_reciever,
+    ));
+    let mut subscription_task = tokio::spawn(youtube_subscription_manager(
+        shutdown.subscribe(),
+        hostname,
+        client,
+        youtube,
+        subscriptions,
+    ));
+
+    tokio::select! {
+        result = &mut pubsub_task => tracing::error!(?result, "pubsub task exited"),
+        result = &mut playlist_task => tracing::error!(?result, "playlist task exited"),
+        result = &mut subscription_task => tracing::error!(?result, "subscription task exited"),
+    }
+
+    let _ = shutdown.send(());
+
+    tokio::join!(pubsub_task, playlist_task, subscription_task).0??;
+
+    Ok(())
 }

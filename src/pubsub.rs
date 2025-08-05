@@ -54,6 +54,7 @@ pub struct HubUnsubscribeChallenge {
 }
 
 pub async fn youtube_pubsub_reciever(
+    mut shutdown: tokio::sync::broadcast::Receiver<()>,
     new_video_channel: Sender<(tracing::Span, Feed)>,
     subscriptions: Arc<Mutex<HashMap<String, YoutubeChannelSubscription>>>,
 ) -> color_eyre::Result<()> {
@@ -116,6 +117,9 @@ pub async fn youtube_pubsub_reciever(
             .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()))
             .into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(async move {
+        let _ = shutdown.recv().await;
+    })
     .await
     .wrap_err("failed to run axum server")
 }
@@ -198,6 +202,7 @@ async fn pubsub_new_upload(
         video_id = feed.entry.video_id,
         channel_id = feed.entry.channel_id,
         title = feed.entry.title,
+        channel_name = tracing::field::Empty,
         video_age_minutes = tracing::field::Empty,
         inserted = tracing::field::Empty,
     );

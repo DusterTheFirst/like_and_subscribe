@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -53,11 +53,12 @@ pub struct YoutubeChannelSubscription {
 }
 
 pub async fn youtube_subscription_manager(
+    mut shutdown: tokio::sync::broadcast::Receiver<()>,
     hostname: String,
-    client: &reqwest::Client,
+    client: reqwest::Client,
     youtube: YouTube<HttpsConnector<HttpConnector>>,
-    subscriptions: &Mutex<HashMap<String, YoutubeChannelSubscription>>,
-) -> color_eyre::Result<()> {
+    subscriptions: Arc<Mutex<HashMap<String, YoutubeChannelSubscription>>>,
+) {
     let mut last_etag: Option<String> = None;
 
     let callback = &format!("https://{hostname}/pubsub");
@@ -66,7 +67,13 @@ pub async fn youtube_subscription_manager(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {},
+            _ = shutdown.recv() => {
+                tracing::info!("subscription manager shutting down");
+                return;
+            }
+        }
 
         async {
             let token = youtube
@@ -84,7 +91,7 @@ pub async fn youtube_subscription_manager(
                 .values_mut()
                 .for_each(|s| s.stale = true);
 
-            get_all_subscriptions(client, subscriptions, &mut last_etag, token).await;
+            get_all_subscriptions(&client, &subscriptions, &mut last_etag, token).await;
 
             // Prune stale entries
             {
