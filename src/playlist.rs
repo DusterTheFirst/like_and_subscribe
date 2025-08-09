@@ -37,7 +37,7 @@ pub async fn youtube_playlist_modifier(
                     return;
                 }
 
-                debug!("validating new feed item");
+                trace!("validating new feed item");
 
                 match subscriptions
                     .lock()
@@ -70,7 +70,7 @@ pub async fn youtube_playlist_modifier(
                 span.record("video_age_minutes", video_age_minutes);
 
                 if video_age_minutes > 1.0 {
-                    trace!("ignoring updated old video");
+                    debug!("ignoring updated old video");
                     span.record("inserted", false);
                     return;
                 }
@@ -100,6 +100,8 @@ pub async fn youtube_playlist_modifier(
                             debug!(%embed, "ignoring shorts video");
                             span.record("inserted", false);
                             return;
+                        } else {
+                            debug!(%embed, "not a shorts video");
                         }
                     }
                     Err(error) => {
@@ -135,7 +137,7 @@ pub async fn youtube_playlist_modifier(
                     }
                 }
 
-                debug!("inserting new video");
+                trace!("inserting new video");
 
                 let result = youtube
                     .playlist_items()
