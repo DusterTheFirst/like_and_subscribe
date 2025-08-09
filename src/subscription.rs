@@ -165,7 +165,7 @@ pub async fn youtube_subscription_manager(
                                 return;
                             }
 
-                            trace!("end")
+                            trace!("updated subscription")
                         }
                         .instrument(span)
                     }).await;
