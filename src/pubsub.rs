@@ -21,7 +21,7 @@ use serde_json::json;
 use tokio::sync::mpsc::Sender;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
-use tracing::{error, trace, trace_span, warn};
+use tracing::{debug_span, error, trace, warn};
 
 use super::subscription::YoutubeChannelSubscription;
 use crate::feed::Feed;
@@ -195,7 +195,7 @@ async fn pubsub_new_upload(
         }
     };
 
-    let span = trace_span!(
+    let span = debug_span!(
         "new_feed_item",
         updated = %feed.entry.updated,
         published = %feed.entry.published,

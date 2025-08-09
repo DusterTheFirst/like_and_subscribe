@@ -60,14 +60,20 @@ async fn main() -> color_eyre::Result<()> {
 
     let youtube = YouTube::new(hyper_client, auth);
 
-    let token = youtube
-        .auth
-        .get_token(&[Scope::Readonly.as_ref(), Scope::Full.as_ref()])
-        .await
-        .map_err(|e| eyre!("{e}"))
-        .wrap_err("unable to get authentication token")?;
+    for scopes in [
+        [Scope::Readonly.as_ref(), Scope::Full.as_ref()].as_slice(),
+        [Scope::Readonly.as_ref()].as_slice(),
+        [Scope::Full.as_ref()].as_slice(),
+    ] {
+        let token = youtube
+            .auth
+            .get_token(scopes)
+            .await
+            .map_err(|e| eyre!("{e}"))
+            .wrap_err("unable to get authentication token")?;
 
-    dbg!(token);
+        dbg!(token);
+    }
 
     Ok(())
 }

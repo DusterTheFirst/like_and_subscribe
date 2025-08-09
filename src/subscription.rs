@@ -16,7 +16,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use jiff::{Span, Zoned};
 use reqwest::{StatusCode, header};
 use serde::{Deserialize, Serialize};
-use tracing::{Instrument, debug, error, info, trace, trace_span, warn};
+use tracing::{Instrument, debug, debug_span, error, info, trace, warn};
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
@@ -126,7 +126,7 @@ pub async fn youtube_subscription_manager(
                 stream::iter(action_queue).for_each_concurrent(10, |(mode, (channel_id, YoutubeChannelSubscription { name, .. }))| {
                         let client = client.clone();
 
-                        let span = trace_span!("subscription_update", channel_id, name, ?mode);
+                        let span = debug_span!("subscription_update", channel_id, name, ?mode);
 
                         // TODO: make this a function?
                         async move {
@@ -188,7 +188,7 @@ pub async fn youtube_subscription_manager(
                 total_count,
                 stale_count, subscribed_count, soonest_expiration, "subscription update end"
             );
-        }.instrument(trace_span!("subscription_manage")).await
+        }.instrument(debug_span!("subscription_manage")).await
     }
 }
 
