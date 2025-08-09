@@ -148,6 +148,7 @@ pub async fn youtube_playlist_modifier(
                                 ShortsScore::Indeterminate(ShortsIndeterminateReason::BadResponse)
                             }
                         };
+
                         let check_metadata = async {
                             let result = youtube
                                 .videos()

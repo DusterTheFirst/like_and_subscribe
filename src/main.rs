@@ -86,6 +86,9 @@ async fn main() -> color_eyre::Result<()> {
         .build()
         .wrap_err("Unable to setup reqwest client")?;
 
+    // TODO: https://docs.rs/google-apis-common/latest/google_apis_common/auth/index.html
+    // TODO: https://developers.google.com/youtube/v3/guides/moving_to_oauth#using-oauth-2.0-for-server-side,-standalone-scripts
+    // TODO: https://developers.google.com/youtube/v3/guides/moving_to_oauth#offline_access
     // TODO: Provide your own `AuthenticatorDelegate` to adjust the way it operates and get feedback about
     // what's going on. You probably want to bring in your own `TokenStorage` to persist tokens and
     // retrieve them from storage.
