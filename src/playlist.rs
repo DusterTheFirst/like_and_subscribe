@@ -1,8 +1,12 @@
 use std::{
+    cmp::Ordering,
     collections::{HashMap, hash_map::Entry},
+    pin::pin,
+    str::FromStr,
     sync::{Arc, Mutex},
 };
 
+use bstr::ByteSlice;
 use futures::{StreamExt, stream};
 use google_youtube3::{
     YouTube,
@@ -11,13 +15,15 @@ use google_youtube3::{
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use jiff::Unit;
-use tokio::sync::mpsc::Receiver;
+use reqwest::header;
+use tokio::{select, sync::mpsc::Receiver};
 use tracing::{Instrument, debug, error, trace, warn};
 
 use crate::{feed::Feed, subscription::YoutubeChannelSubscription};
 
 pub async fn youtube_playlist_modifier(
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
+    client: reqwest::Client,
     youtube: YouTube<HttpsConnector<HttpConnector>>,
     subscriptions: Arc<Mutex<HashMap<String, YoutubeChannelSubscription>>>,
     playlist_id: Arc<str>,
@@ -27,6 +33,7 @@ pub async fn youtube_playlist_modifier(
         10,
         |(span, Feed { entry, .. })| {
             let youtube = youtube.clone();
+            let client = client.clone();
             let subscriptions = subscriptions.as_ref();
             let playlist_id = playlist_id.as_ref();
             let span2 = span.clone();
@@ -71,74 +78,258 @@ pub async fn youtube_playlist_modifier(
 
                 if video_age_minutes > 1.0 {
                     debug!("ignoring updated old video");
-                    span.record("inserted", false);
                     return;
                 }
 
-                // TODO: shorts detection: https://issuetracker.google.com/issues/232112727
                 // Check if the video is a short
-                let result = youtube
-                    .videos()
-                    .list(&vec!["contentDetails".into(), "player".into()])
-                    .add_id(&entry.video_id)
-                    .doit()
-                    .await;
 
-                match result {
-                    Ok((_, items)) => {
-                        let video = items
-                            .items
-                            .iter()
-                            .flatten()
-                            .next()
-                            .expect("exactly one entry should be returned");
 
-                        let embed = video.player.as_ref().unwrap().embed_html.as_ref().unwrap();
-                        let is_short = embed.contains("youtube.com/shorts/");
+                let is_short_future = async {
+                    #[derive(Debug)]
+                    enum ShortsScore {
+                        Indeterminate(ShortsIndeterminateReason),
+                        Determinate(bool),
+                        Heuristic {
+                            duration: bool,
+                            vertical: bool,
+                            hashtag: bool
+                        },
+                    }
 
-                        if is_short {
-                            debug!(%embed, "ignoring shorts video");
-                            span.record("inserted", false);
-                            return;
-                        } else {
-                            debug!(%embed, "not a shorts video");
+                    #[derive(Debug)]
+                    enum ShortsIndeterminateReason {
+                        BadRequest,
+                        BadResponse,
+                        NonWatchRedirect,
+                    }
+
+                    let check_redirect = async {
+                        let result = client
+                            .execute(
+                                client
+                                    .head(format!("https://www.youtube.com/shorts/{}", entry.video_id))
+                                    .build()
+                                    .unwrap(),
+                            )
+                            .await;
+
+                            let response = match result {
+                                Ok(response) => response,
+                                Err(error) => {
+                                    warn!(%error, "failed to request shorts url");
+                                    return ShortsScore::Indeterminate(
+                                        ShortsIndeterminateReason::BadRequest,
+                                    );
+                                }
+                            };
+
+                            if response.status().is_success() {
+                                ShortsScore::Determinate(true)
+                            } else if response.status().is_redirection() {
+                                let Some(location) = response.headers().get(header::LOCATION) else {
+                                    error!(
+                                        ?response,
+                                        "redirect response did not contain a Location header"
+                                    );
+                                    return ShortsScore::Indeterminate(
+                                        ShortsIndeterminateReason::BadResponse,
+                                    );
+                                };
+
+                                if location.as_bytes().contains_str("watch") {
+                                    ShortsScore::Determinate(false)
+                                } else {
+                                    ShortsScore::Indeterminate(
+                                        ShortsIndeterminateReason::NonWatchRedirect,
+                                    )
+                                }
+                            } else {
+                                error!(?response, "redirect response had unexpected status code");
+                                ShortsScore::Indeterminate(ShortsIndeterminateReason::BadResponse)
+                            }
+                        };
+                        let check_metadata = async {
+                            let result = youtube
+                                .videos()
+                                .list(&vec!["contentDetails".into(), "snippet".into()])
+                                .add_id(&entry.video_id)
+                                .doit()
+                                .await;
+
+                            match result {
+                                Ok((_, items)) => {
+                                    let video = items
+                                        .items
+                                        .iter()
+                                        .flatten()
+                                        .next()
+                                        .expect("exactly one entry should be returned");
+
+                                    let duration_heuristic = 'duration :{
+                                        let duration = video.content_details.as_ref().and_then(|d| d.duration.as_deref());
+                                        let Some(duration) = duration else {
+                                            warn!(?video, "unable to extract iso duration from video");
+                                            break 'duration false;
+                                        };
+
+                                        let duration = match jiff::Span::from_str(duration) {
+                                            Ok(duration) => duration,
+                                            Err(error) => {
+                                                error!(%error, %duration, "unable to parse duration");
+                                                break 'duration false;
+                                            },
+                                        };
+
+                                        let ordering = match duration.compare(jiff::Span::new().seconds(180)) {
+                                            Ok(ordering) => ordering,
+                                            Err(error) => {
+                                                error!(%error, %duration, "unable to compare video duration");
+                                                break 'duration false;
+                                            },
+                                        };
+
+                                        match ordering {
+                                            Ordering::Less | Ordering::Equal  => true,
+                                            Ordering::Greater => false,
+                                        }
+                                    };
+
+                                    let hashtag_heuristic = 'hashtag: {
+                                        let title = video.snippet.as_ref().and_then(|s| Option::zip(s.title.as_deref(), s.description.as_deref()));
+                                        let Some((title, description)) = title else {
+                                            warn!(?video, "unable to extract title and description from video");
+                                            break 'hashtag false;
+                                        };
+
+                                        let pattern = "#shorts";
+
+                                        title.contains(pattern) || description.contains(pattern)
+                                    };
+
+                                    let vertical_heuristic = 'vertical: {
+                                        let dimensions = video
+                                            .snippet.as_ref()
+                                            .and_then(|s| s.thumbnails.as_ref())
+                                            .and_then(|t| {
+                                                t.default.as_ref()
+                                                    .or(t.standard.as_ref())
+                                                    .or(t.medium.as_ref())
+                                                    .or(t.high.as_ref())
+                                                    .or(t.maxres.as_ref())
+                                            })
+                                            .and_then(|d| Option::zip(d.height, d.width));
+
+                                        let Some((height, width)) = dimensions else {
+                                                warn!(?video, "unable to extract thumbnail sizes");
+
+                                            break 'vertical false;
+                                        };
+
+                                        height > width
+                                    };
+
+                                    ShortsScore::Heuristic { duration: duration_heuristic, vertical: vertical_heuristic, hashtag: hashtag_heuristic }
+                                }
+                                Err(error) => {
+                                    warn!(%error, "failed to get video metadata");
+                                    ShortsScore::Indeterminate(
+                                        ShortsIndeterminateReason::BadResponse,
+                                    )
+                                }
+                            }
+                        };
+
+                    let mut check_redirect = pin!(check_redirect);
+                    let mut check_metadata = pin!(check_metadata);
+
+                    let score = select! {
+                        score = &mut check_redirect => {
+                            if matches!(score, ShortsScore::Indeterminate(_)) {
+                                check_metadata.await
+                            } else {
+                                score
+                            }
                         }
-                    }
-                    Err(error) => {
-                        warn!(%error, "failed to check if video is a short");
-                    }
-                }
+                        score = &mut check_metadata => {
+                            if matches!(score, ShortsScore::Indeterminate(_)) {
+                                check_redirect.await
+                            } else {
+                                score
+                            }
+                        }
+                    };
 
-                span.record("inserted", true);
+                    span.record("short_score", format!("{score:?}"));
+
+                    match score {
+                        ShortsScore::Determinate(result) => result,
+                        ShortsScore::Heuristic { duration, vertical, hashtag } => {
+                            // Heuristic decision
+                            duration && (vertical || hashtag)
+                        }
+                        ShortsScore::Indeterminate(shorts_indeterminate_reason) => {
+                            // TODO: do something with the reason?
+                            // Do not flag as a short if we are not sure
+                            false
+                        },
+                    }
+                };
 
                 // Duplicate detection
-                let result = youtube
-                    .playlist_items()
-                    .list(&vec!["contentDetails".to_string()])
-                    .playlist_id(playlist_id)
-                    .video_id(&entry.video_id)
-                    .doit()
-                    .await;
+                let detect_duplicate = async {
+                    let result = youtube
+                        .playlist_items()
+                        .list(&vec!["contentDetails".to_string()])
+                        .playlist_id(playlist_id)
+                        .video_id(&entry.video_id)
+                        .doit()
+                        .await;
 
-                match result {
-                    Ok((_, items)) => {
-                        let item_exists = items.items.into_iter().flatten().any(|i| {
-                            i.content_details.as_ref().and_then(|d| d.video_id.as_ref())
-                                == Some(&entry.video_id)
-                        });
+                    match result {
+                        Ok((_, items)) => {
+                            let item_exists = items.items.into_iter().flatten().any(|i| {
+                                i.content_details.as_ref().and_then(|d| d.video_id.as_ref())
+                                    == Some(&entry.video_id)
+                            });
 
-                        if item_exists {
-                            warn!("video exists in playlist already, skipping");
-                            return;
+                            if item_exists {
+                                warn!("video exists in playlist already, skipping");
+                                return true;
+                            }
+                        }
+                        Err(error) => {
+                            warn!(%error, "failed to check if video exists in playlist already");
                         }
                     }
-                    Err(error) => {
-                        warn!(%error, "failed to check if video exists in playlist already");
+
+                    false
+                };
+
+                let mut is_short_future = pin!(is_short_future);
+                let mut detect_duplicate = pin!(detect_duplicate);
+
+                let skip = select! {
+                    is_short = &mut is_short_future => {
+                        if is_short {
+                            true
+                        } else {
+                            detect_duplicate.await
+                        }
                     }
+                    is_duplicate = &mut detect_duplicate => {
+                        if is_duplicate {
+                            true
+                        } else {
+                            is_short_future.await
+                        }
+                    }
+                };
+
+                if skip {
+                    return;
                 }
 
                 trace!("inserting new video");
-
                 let result = youtube
                     .playlist_items()
                     .insert(PlaylistItem {
@@ -159,6 +350,7 @@ pub async fn youtube_playlist_modifier(
                 match result {
                     Ok(_) => {
                         debug!("video inserted");
+                        span.record("inserted", true);
                     }
                     Err(error) => {
                         error!(%error, "failed to insert video");

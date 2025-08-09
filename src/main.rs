@@ -13,6 +13,7 @@ use google_youtube3::{
 };
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
+use reqwest::redirect::Policy;
 use tower::ServiceBuilder;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
@@ -81,6 +82,7 @@ async fn main() -> color_eyre::Result<()> {
                 .buffer(1024)
                 .rate_limit(5, Duration::from_secs(10)), // TODO: does this mean 5 sets of 10?
         )
+        .redirect(Policy::none())
         .build()
         .wrap_err("Unable to setup reqwest client")?;
 
@@ -134,6 +136,7 @@ async fn main() -> color_eyre::Result<()> {
     ));
     let mut playlist_task = tokio::spawn(youtube_playlist_modifier(
         shutdown.subscribe(),
+        client.clone(),
         youtube.clone(),
         subscriptions.clone(),
         Arc::from(playlist_id),
