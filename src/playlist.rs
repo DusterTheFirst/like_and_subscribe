@@ -32,6 +32,11 @@ pub async fn youtube_playlist_modifier(
             let span2 = span.clone();
 
             async move {
+                if entry.video_id == "BxV14h0kFs0" {
+                    trace!("skipping tom scott automated video");
+                    return;
+                }
+
                 debug!("validating new feed item");
 
                 match subscriptions

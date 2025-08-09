@@ -69,6 +69,10 @@ async fn main() -> color_eyre::Result<()> {
     let hostname =
         std::env::var("PUBSUB_HOSTNAME").wrap_err("Unable to read PUBSUB_HOSTNAME env var")?;
 
+    // TODO: lettre notifications to fastmail w/ sorting to a special folder for problems
+    // TODO: store logs in sql
+    // TODO: store pubsubhubbub subscriptions in sql
+
     let client = reqwest::ClientBuilder::new()
         .https_only(true)
         .connector_layer(
