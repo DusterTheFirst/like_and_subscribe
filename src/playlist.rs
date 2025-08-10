@@ -113,141 +113,148 @@ pub async fn youtube_playlist_modifier(
                             )
                             .await;
 
-                            let response = match result {
-                                Ok(response) => response,
-                                Err(error) => {
-                                    warn!(%error, "failed to request shorts url");
-                                    return ShortsScore::Indeterminate(
-                                        ShortsIndeterminateReason::BadRequest,
-                                    );
-                                }
+                        let response = match result {
+                            Ok(response) => response,
+                            Err(error) => {
+                                warn!(%error, "failed to request shorts url");
+                                return ShortsScore::Indeterminate(
+                                    ShortsIndeterminateReason::BadRequest,
+                                );
+                            }
+                        };
+
+                        if response.status().is_success() {
+                            ShortsScore::Determinate(true)
+                        } else if response.status().is_redirection() {
+                            let Some(location) = response.headers().get(header::LOCATION) else {
+                                error!(
+                                    ?response,
+                                    "redirect response did not contain a Location header"
+                                );
+                                return ShortsScore::Indeterminate(
+                                    ShortsIndeterminateReason::BadResponse,
+                                );
                             };
 
-                            if response.status().is_success() {
-                                ShortsScore::Determinate(true)
-                            } else if response.status().is_redirection() {
-                                let Some(location) = response.headers().get(header::LOCATION) else {
-                                    error!(
-                                        ?response,
-                                        "redirect response did not contain a Location header"
-                                    );
-                                    return ShortsScore::Indeterminate(
-                                        ShortsIndeterminateReason::BadResponse,
-                                    );
+                            if location.as_bytes().contains_str("watch") {
+                                ShortsScore::Determinate(false)
+                            } else {
+                                ShortsScore::Indeterminate(
+                                    ShortsIndeterminateReason::NonWatchRedirect,
+                                )
+                            }
+                        } else {
+                            error!(?response, "redirect response had unexpected status code");
+                            ShortsScore::Indeterminate(ShortsIndeterminateReason::BadResponse)
+                        }
+                    };
+
+                    let check_metadata = async {
+                        let result = youtube
+                            .videos()
+                            .list(&vec!["contentDetails".into(), "snippet".into()])
+                            .add_id(&entry.video_id)
+                            .doit()
+                            .await;
+
+                        match result {
+                            Ok((_, items)) => {
+                                let video = items
+                                    .items
+                                    .iter()
+                                    .flatten()
+                                    .next()
+                                    .expect("exactly one entry should be returned");
+
+                                let duration_heuristic = 'duration :{
+                                    let duration = video.content_details.as_ref().and_then(|d| d.duration.as_deref());
+                                    let Some(duration) = duration else {
+                                        warn!(?video, "unable to extract iso duration from video");
+                                        break 'duration false;
+                                    };
+
+                                    let duration = match jiff::Span::from_str(duration) {
+                                        Ok(duration) => duration,
+                                        Err(error) => {
+                                            error!(%error, %duration, "unable to parse duration");
+                                            break 'duration false;
+                                        },
+                                    };
+
+                                    info!(%duration, "duration");
+
+                                    let ordering = match duration.compare(jiff::Span::new().seconds(180)) {
+                                        Ok(ordering) => ordering,
+                                        Err(error) => {
+                                            error!(%error, %duration, "unable to compare video duration");
+                                            break 'duration false;
+                                        },
+                                    };
+
+                                    match ordering {
+                                        Ordering::Less | Ordering::Equal  => true,
+                                        Ordering::Greater => false,
+                                    }
                                 };
 
-                                if location.as_bytes().contains_str("watch") {
-                                    ShortsScore::Determinate(false)
-                                } else {
-                                    ShortsScore::Indeterminate(
-                                        ShortsIndeterminateReason::NonWatchRedirect,
-                                    )
-                                }
-                            } else {
-                                error!(?response, "redirect response had unexpected status code");
-                                ShortsScore::Indeterminate(ShortsIndeterminateReason::BadResponse)
+                                let hashtag_heuristic = 'hashtag: {
+                                    let title = video.snippet.as_ref().and_then(|s| Option::zip(s.title.as_deref(), s.description.as_deref()));
+                                    let Some((title, description)) = title else {
+                                        warn!(?video, "unable to extract title and description from video");
+                                        break 'hashtag false;
+                                    };
+
+                                    let pattern = "#shorts";
+
+                                    title.contains(pattern) || description.contains(pattern)
+                                };
+
+                                let vertical_heuristic = 'vertical: {
+                                    let dimensions = video
+                                        .snippet.as_ref()
+                                        .and_then(|s| s.thumbnails.as_ref())
+                                        .and_then(|t| {
+                                            t.default.as_ref()
+                                                .or(t.standard.as_ref())
+                                                .or(t.medium.as_ref())
+                                                .or(t.high.as_ref())
+                                                .or(t.maxres.as_ref())
+                                        })
+                                        .and_then(|d| Option::zip(d.height, d.width));
+
+                                    let Some((height, width)) = dimensions else {
+                                        warn!(?video, "unable to extract thumbnail sizes");
+                                        break 'vertical false;
+                                    };
+
+                                    info!(%width, %height, "dimensions");
+
+                                    height > width
+                                };
+
+                                ShortsScore::Heuristic { duration: duration_heuristic, vertical: vertical_heuristic, hashtag: hashtag_heuristic }
                             }
-                        };
-
-                        let check_metadata = async {
-                            let result = youtube
-                                .videos()
-                                .list(&vec!["contentDetails".into(), "snippet".into()])
-                                .add_id(&entry.video_id)
-                                .doit()
-                                .await;
-
-                            match result {
-                                Ok((_, items)) => {
-                                    let video = items
-                                        .items
-                                        .iter()
-                                        .flatten()
-                                        .next()
-                                        .expect("exactly one entry should be returned");
-
-                                    let duration_heuristic = 'duration :{
-                                        let duration = video.content_details.as_ref().and_then(|d| d.duration.as_deref());
-                                        let Some(duration) = duration else {
-                                            warn!(?video, "unable to extract iso duration from video");
-                                            break 'duration false;
-                                        };
-
-                                        let duration = match jiff::Span::from_str(duration) {
-                                            Ok(duration) => duration,
-                                            Err(error) => {
-                                                error!(%error, %duration, "unable to parse duration");
-                                                break 'duration false;
-                                            },
-                                        };
-
-                                        info!(%duration, "duration");
-
-                                        let ordering = match duration.compare(jiff::Span::new().seconds(180)) {
-                                            Ok(ordering) => ordering,
-                                            Err(error) => {
-                                                error!(%error, %duration, "unable to compare video duration");
-                                                break 'duration false;
-                                            },
-                                        };
-
-                                        match ordering {
-                                            Ordering::Less | Ordering::Equal  => true,
-                                            Ordering::Greater => false,
-                                        }
-                                    };
-
-                                    let hashtag_heuristic = 'hashtag: {
-                                        let title = video.snippet.as_ref().and_then(|s| Option::zip(s.title.as_deref(), s.description.as_deref()));
-                                        let Some((title, description)) = title else {
-                                            warn!(?video, "unable to extract title and description from video");
-                                            break 'hashtag false;
-                                        };
-
-                                        let pattern = "#shorts";
-
-                                        title.contains(pattern) || description.contains(pattern)
-                                    };
-
-                                    let vertical_heuristic = 'vertical: {
-                                        let dimensions = video
-                                            .snippet.as_ref()
-                                            .and_then(|s| s.thumbnails.as_ref())
-                                            .and_then(|t| {
-                                                t.default.as_ref()
-                                                    .or(t.standard.as_ref())
-                                                    .or(t.medium.as_ref())
-                                                    .or(t.high.as_ref())
-                                                    .or(t.maxres.as_ref())
-                                            })
-                                            .and_then(|d| Option::zip(d.height, d.width));
-
-                                        let Some((height, width)) = dimensions else {
-                                            warn!(?video, "unable to extract thumbnail sizes");
-                                            break 'vertical false;
-                                        };
-
-                                        info!(%width, %height, "dimensions");
-
-                                        height > width
-                                    };
-
-                                    ShortsScore::Heuristic { duration: duration_heuristic, vertical: vertical_heuristic, hashtag: hashtag_heuristic }
-                                }
-                                Err(error) => {
-                                    warn!(%error, "failed to get video metadata");
-                                    ShortsScore::Indeterminate(
-                                        ShortsIndeterminateReason::BadResponse,
-                                    )
-                                }
+                            Err(error) => {
+                                warn!(%error, "failed to get video metadata");
+                                ShortsScore::Indeterminate(
+                                    ShortsIndeterminateReason::BadResponse,
+                                )
                             }
-                        };
+                        }
+                    };
 
                     let mut check_redirect = pin!(check_redirect);
                     let mut check_metadata = pin!(check_metadata);
 
                     let score = select! {
                         score = &mut check_redirect => {
+                             if matches!(score, ShortsScore::Indeterminate(_)) {
+                                check_metadata.await
+                            } else {
+                                score
+                            }
+                        }
+                        score = &mut check_metadata => {
                             match score {
                                 ShortsScore::Indeterminate(_) => {
                                     check_metadata.await
@@ -262,13 +269,6 @@ pub async fn youtube_playlist_modifier(
                                     }
                                 },
                                 ShortsScore::Determinate(_) => score,
-                            }
-                        }
-                        score = &mut check_metadata => {
-                            if matches!(score, ShortsScore::Indeterminate(_)) {
-                                check_redirect.await
-                            } else {
-                                score
                             }
                         }
                     };
