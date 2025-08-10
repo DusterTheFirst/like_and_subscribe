@@ -17,7 +17,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use jiff::Unit;
 use reqwest::header;
 use tokio::{select, sync::mpsc::Receiver};
-use tracing::{Instrument, debug, error, trace, warn};
+use tracing::{Instrument, debug, error, info, trace, warn};
 
 use crate::{feed::Feed, subscription::YoutubeChannelSubscription};
 
@@ -181,6 +181,8 @@ pub async fn youtube_playlist_modifier(
                                             },
                                         };
 
+                                        info!(%duration, "duration");
+
                                         let ordering = match duration.compare(jiff::Span::new().seconds(180)) {
                                             Ok(ordering) => ordering,
                                             Err(error) => {
@@ -221,10 +223,11 @@ pub async fn youtube_playlist_modifier(
                                             .and_then(|d| Option::zip(d.height, d.width));
 
                                         let Some((height, width)) = dimensions else {
-                                                warn!(?video, "unable to extract thumbnail sizes");
-
+                                            warn!(?video, "unable to extract thumbnail sizes");
                                             break 'vertical false;
                                         };
+
+                                        info!(%width, %height, "dimensions");
 
                                         height > width
                                     };
@@ -245,10 +248,20 @@ pub async fn youtube_playlist_modifier(
 
                     let score = select! {
                         score = &mut check_redirect => {
-                            if matches!(score, ShortsScore::Indeterminate(_)) {
-                                check_metadata.await
-                            } else {
-                                score
+                            match score {
+                                ShortsScore::Indeterminate(_) => {
+                                    check_metadata.await
+                                },
+                                ShortsScore::Heuristic { .. } => {
+                                    // If heuristic used, verify redirect
+                                    let redirect_score = check_redirect.await;
+                                    if matches!(redirect_score, ShortsScore::Indeterminate(_)) {
+                                        score
+                                    } else {
+                                        redirect_score
+                                    }
+                                },
+                                ShortsScore::Determinate(_) => score,
                             }
                         }
                         score = &mut check_metadata => {
