@@ -204,7 +204,6 @@ async fn pubsub_new_upload(
         title = feed.entry.title,
         channel_name = tracing::field::Empty,
         video_age_minutes = tracing::field::Empty,
-        short_score = tracing::field::Empty,
         inserted = false,
     );
 
