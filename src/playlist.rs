@@ -85,9 +85,19 @@ pub async fn youtube_playlist_modifier(
                 let is_short_future = async {
                     // TODO: do something with the reason?
                     // Do not flag as a short if we are not sure
-                    check_redirect(&entry.video_id, &client)
-                        .await
-                        .unwrap_or(false)
+                    let is_short = check_redirect(&entry.video_id, &client).await;
+
+                    match is_short.as_ref() {
+                        Ok(false) => false,
+                        Ok(true) => {
+                            tracing::debug!("video is a short");
+                            true
+                        }
+                        Err(error) => {
+                            tracing::warn!(?error, "unable to determine if video is a short");
+                            false
+                        }
+                    }
                 };
 
                 // Duplicate detection
