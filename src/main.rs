@@ -32,6 +32,7 @@ pub mod subscription;
 // TODO: FIXME: log/store bad XML feed items or something for debugging (due to "missing field `@xmlns:yt`")
 // TODO: FIXME: better token refreshing (send an email or something)
 // TODO: FIXME: local tailnet vs external tailnet URLs. Basically only pubsub should be external
+// TODO: https://github.com/stalwartlabs/mail-send https://github.com/stalwartlabs/mail-builder
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
