@@ -1,0 +1,8 @@
+[package]
+name    = "jiff_sea-orm_compat"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sea-orm = { workspace = true }
+jiff    = { workspace = true }

@@ -12,8 +12,8 @@ pub struct Model {
     pub shorts_redirect: bool,
     #[sea_orm(column_type = "Text")]
     pub visibility: String,
-    pub duration: i32,
-    pub timestamp: i32,
+    pub duration: jiff_sea_orm_compat::JiffSignedDurationSeconds,
+    pub timestamp: jiff_sea_orm_compat::JiffTimestampMilliseconds,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

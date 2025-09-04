@@ -9,12 +9,12 @@ aws-lc-rs          = { version = "1.13.3", features = ["bindgen"] }
 axum               = "0.8.4"
 axum-extra         = { version = "0.10.1", features = ["error-response", "typed-header"] }
 bstr               = "1.12.0"
-color-eyre         = "0.6.5"
+color-eyre         = { workspace = true }
 futures            = "0.3.31"
 google-youtube3    = "6.0.0"
 hyper-rustls       = { version = "0.27.7", features = ["http2"] }
 hyper-util         = "0.1.16"
-jiff               = { version = "0.2.15", features = ["serde"] }
+jiff               = { workspace = true }
 migration          = { workspace = true }
 entity             = { workspace = true }
 mime               = "0.3.17"
@@ -32,4 +32,4 @@ tower-http         = { version = "0.6.6", features = ["fs", "trace"] }
 tracing            = "0.1.41"
 tracing-error      = "0.2.1"
 tracing-journald   = "0.3.1"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing-subscriber = { workspace = true }

@@ -9,7 +9,7 @@ pub struct Model {
     pub id: i32,
     #[sea_orm(column_type = "Text")]
     pub channel_id: String,
-    pub timestamp: i32,
+    pub timestamp: jiff_sea_orm_compat::JiffTimestampMilliseconds,
     #[sea_orm(column_type = "Text")]
     pub action: String,
 }

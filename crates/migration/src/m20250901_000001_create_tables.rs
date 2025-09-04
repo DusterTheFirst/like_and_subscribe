@@ -66,7 +66,7 @@ impl TableTrait for OAuth {
             .col(schema::pk_auto(OAuth::RowId))
             .col(schema::text(OAuth::AccessToken))
             .col(schema::text(OAuth::RefreshToken))
-            .col(schema::integer(OAuth::ExpiresAt))
+            .col(schema::big_integer(OAuth::ExpiresAt))
             .to_owned()
     }
 }
@@ -137,7 +137,7 @@ impl TableTrait for ActiveSubscriptions {
                     .from(ActiveSubscriptions::Table, ActiveSubscriptions::ChannelId)
                     .to(KnownChannels::Table, KnownChannels::ChannelId),
             )
-            .col(schema::integer(ActiveSubscriptions::Expiration))
+            .col(schema::big_integer(ActiveSubscriptions::Expiration))
             .to_owned()
     }
 }
@@ -165,7 +165,7 @@ impl TableTrait for SubscriptionQueue {
                     .from(SubscriptionQueue::Table, SubscriptionQueue::ChannelId)
                     .to(KnownChannels::Table, KnownChannels::ChannelId),
             )
-            .col(schema::integer(SubscriptionQueue::Timestamp))
+            .col(schema::big_integer(SubscriptionQueue::Timestamp))
             .col(schema::text(SubscriptionQueue::Action))
             .to_owned()
     }
@@ -203,9 +203,9 @@ impl TableTrait for VideoQueue {
                     .from(VideoQueue::Table, VideoQueue::VideoId)
                     .to(KnownVideos::Table, KnownVideos::VideoId),
             )
-            .col(schema::integer(VideoQueue::PublishedAt))
-            .col(schema::integer(VideoQueue::UpdatedAt))
-            .col(schema::integer(VideoQueue::Timestamp))
+            .col(schema::big_integer(VideoQueue::PublishedAt))
+            .col(schema::big_integer(VideoQueue::UpdatedAt))
+            .col(schema::big_integer(VideoQueue::Timestamp))
             .to_owned()
     }
 }
@@ -237,8 +237,8 @@ impl TableTrait for VideoQueueResult {
             .col(schema::text(VideoQueueResult::Action))
             .col(schema::boolean(VideoQueueResult::ShortsRedirect))
             .col(schema::text(VideoQueueResult::Visibility))
-            .col(schema::integer(VideoQueueResult::Duration))
-            .col(schema::integer(VideoQueueResult::Timestamp))
+            .col(schema::big_integer(VideoQueueResult::Duration))
+            .col(schema::big_integer(VideoQueueResult::Timestamp))
             .to_owned()
     }
 }

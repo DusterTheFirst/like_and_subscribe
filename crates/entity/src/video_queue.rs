@@ -11,9 +11,9 @@ pub struct Model {
     pub channel_id: String,
     #[sea_orm(column_type = "Text")]
     pub video_id: String,
-    pub published_at: i32,
-    pub updated_at: i32,
-    pub timestamp: i32,
+    pub published_at: jiff_sea_orm_compat::JiffTimestampMilliseconds,
+    pub updated_at: jiff_sea_orm_compat::JiffTimestampMilliseconds,
+    pub timestamp: jiff_sea_orm_compat::JiffTimestampMilliseconds,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
