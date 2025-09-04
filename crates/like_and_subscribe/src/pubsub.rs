@@ -53,78 +53,7 @@ pub struct HubUnsubscribeChallenge {
     pub(crate) challenge: String,
 }
 
-pub async fn youtube_pubsub_reciever(
-    mut shutdown: tokio::sync::broadcast::Receiver<()>,
-    new_video_channel: Sender<(tracing::Span, Feed)>,
-    subscriptions: Arc<Mutex<HashMap<String, YoutubeChannelSubscription>>>,
-) -> color_eyre::Result<()> {
-    axum::serve(
-        tokio::net::TcpListener::bind("0.0.0.0:8080")
-            .await
-            .wrap_err("unable to bind to port 8080")?,
-        axum::Router::new()
-            .route("/pubsub", {
-                method_routing::get(pubsub_subscription)
-                    .with_state(subscriptions.clone())
-                    .post(pubsub_new_upload)
-                    .with_state(new_video_channel)
-            })
-            .route(
-                "/debug",
-                method_routing::get(
-                    |State(subscriptions): State<
-                        Arc<Mutex<HashMap<String, YoutubeChannelSubscription>>>,
-                    >| async move {
-                        let subscriptions = HashMap::clone(&subscriptions.lock().unwrap());
-                        let (subscribed, soonest_expiration, latest_expiration) =
-                            subscriptions.values().fold(
-                                (
-                                    0,
-                                    Zoned::new(Timestamp::MAX, TimeZone::system()),
-                                    Zoned::new(Timestamp::MIN, TimeZone::system()),
-                                ),
-                                |(subscribed, soonest_expiration, latest_expiration), s| {
-                                    if let Some(expiration) = s.subscription_expiration.as_ref() {
-                                        (
-                                            subscribed + 1,
-                                            Zoned::min(soonest_expiration, expiration.clone()),
-                                            Zoned::max(latest_expiration, expiration.clone()),
-                                        )
-                                    } else {
-                                        (subscribed, soonest_expiration, latest_expiration)
-                                    }
-                                },
-                            );
-
-                        Json(json!({
-                            "stats": {
-                                "subscribed": subscribed,
-                                "total": subscriptions.len(),
-                                "expiration": {
-                                    "soonest": soonest_expiration,
-                                    "latest": latest_expiration
-                                }
-                            },
-                            "subscriptions":subscriptions
-                        }))
-                    },
-                )
-                .with_state(subscriptions),
-            )
-            .fallback(method_routing::any(|| async {
-                axum::http::StatusCode::PAYMENT_REQUIRED
-            }))
-            .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()))
-            .into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        let _ = shutdown.recv().await;
-    })
-    .await
-    .wrap_err("failed to run axum server")
-}
-
-async fn pubsub_subscription(
+pub async fn pubsub_subscription(
     query: Result<Query<HubChallenge>, QueryRejection>,
     State(subscriptions): State<Arc<Mutex<HashMap<String, YoutubeChannelSubscription>>>>,
 ) -> Result<String, StatusCode> {
@@ -149,7 +78,11 @@ async fn pubsub_subscription(
             );
 
             trace!(topic = query.topic, %expiration, "validating subscription");
-            match subscriptions.lock().unwrap().get_mut(id) {
+            match subscriptions
+                .lock()
+                .expect("mutex should not be poisoned")
+                .get_mut(id)
+            {
                 Some(channel) => {
                     trace!(topic = query.topic, %expiration, "subscription expected");
                     channel.subscription_expiration = Some(expiration);
@@ -169,14 +102,16 @@ async fn pubsub_subscription(
     }
 }
 
-async fn pubsub_new_upload(
+pub async fn pubsub_new_upload(
     // connect: ConnectInfo<SocketAddr>,
     // TypedHeader(user_agent): TypedHeader<UserAgent>,
     TypedHeader(content_type): TypedHeader<ContentType>,
     new_video_channel: State<Sender<(tracing::Span, Feed)>>,
     body: String,
 ) -> StatusCode {
-    if Mime::from(content_type) != Mime::from_str("application/atom+xml").unwrap() {
+    if Mime::from(content_type)
+        != Mime::from_str("application/atom+xml").expect("mime should be valid")
+    {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE;
     }
 

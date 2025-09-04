@@ -66,6 +66,7 @@ pub async fn youtube_subscription_manager(
     let mut ticker = tokio::time::interval(Duration::from_secs(60 * 60)); // One hour
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // FIXME: somehow this loop gets stuck. This is likely due to a key expiring and it spinning up a server to do OAUTH.... I need to fix that
     loop {
         tokio::select! {
             _ = ticker.tick() => {},
@@ -81,13 +82,13 @@ pub async fn youtube_subscription_manager(
                 .get_token(&[Scope::Readonly.as_ref()])
                 .await
                 .map_err(|e| eyre!("{e}"))
-                .wrap_err("unable to get authentication token").unwrap()
-                .unwrap(); // TODO: FIXME: remove unwrap
+                .wrap_err("unable to get authentication token").expect("token should be refreshed")
+                .expect("token should exist"); // TODO: FIXME: remove unwrap
 
             // Mark all existing subscriptions stale
             subscriptions
                 .lock()
-                .unwrap()
+                .expect("mutex should not be poisoned")
                 .values_mut()
                 .for_each(|s| s.stale = true);
 
@@ -112,6 +113,7 @@ pub async fn youtube_subscription_manager(
                         .iter()
                         .filter(|(_, s)| match s.subscription_expiration.as_ref() {
                             Some(expiration) => {
+                                // TODO: break out into function and merge with test
                                 let now = Zoned::now();
 
                                 // re-subscribe if expring in a day
@@ -124,51 +126,51 @@ pub async fn youtube_subscription_manager(
                 );
 
                 stream::iter(action_queue).for_each_concurrent(10, |(mode, (channel_id, YoutubeChannelSubscription { name, .. }))| {
-                        let client = client.clone();
+                    let client = client.clone();
 
-                        let span = debug_span!("subscription_update", channel_id, name, ?mode);
+                    let span = debug_span!("subscription_update", channel_id, name, ?mode);
 
-                        // TODO: make this a function?
-                        async move {
-                            let request = client
-                                .post("https://pubsubhubbub.appspot.com/subscribe")
-                                .form(&HubRequest {
-                                    mode,
-                                    callback,
-                                    verify: Verify::Synchronous,
-                                    topic: format!(
-                                        "https://www.youtube.com/xml/feeds/videos.xml?channel_id={channel_id}"
-                                    ),
-                                })
-                                .build()
-                                .expect("request should be well formed");
+                    // TODO: make this a function?
+                    async move {
+                        let request = client
+                            .post("https://pubsubhubbub.appspot.com/subscribe")
+                            .form(&HubRequest {
+                                mode,
+                                callback,
+                                verify: Verify::Synchronous,
+                                topic: format!(
+                                    "https://www.youtube.com/xml/feeds/videos.xml?channel_id={channel_id}"
+                                ),
+                            })
+                            .build()
+                            .expect("request should be well formed");
 
-                            let response = match client.execute(request).await {
-                                Ok(response) => response,
-                                Err(error) => {
-                                    // TODO: implement retries? put back on the queue?
-                                    // TODO: keep track of subscribed channels?? how do we know whats new?
-                                    warn!(%error, "failed to subscribe to a youtube channel");
-                                    return;
-                                }
-                            };
-
-                            if response.status() == StatusCode::TOO_MANY_REQUESTS {
-                                // TODO: retries from too many requests
-                                error!("too many requests");
+                        let response = match client.execute(request).await {
+                            Ok(response) => response,
+                            Err(error) => {
+                                // TODO: implement retries? put back on the queue?
+                                // TODO: keep track of subscribed channels?? how do we know whats new?
+                                warn!(%error, "failed to subscribe to a youtube channel");
                                 return;
                             }
+                        };
 
-                            if !response.status().is_success() {
-                                let status_code = response.status().as_u16();
-                                warn!(status_code, "server returned error");
-                                return;
-                            }
-
-                            trace!("updated subscription")
+                        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                            // TODO: retries from too many requests
+                            error!("too many requests");
+                            return;
                         }
-                        .instrument(span)
-                    }).await;
+
+                        if !response.status().is_success() {
+                            let status_code = response.status().as_u16();
+                            warn!(status_code, "server returned error");
+                            return;
+                        }
+
+                        trace!("updated subscription")
+                    }
+                    .instrument(span)
+                }).await;
             }
 
             let subscriptions = subscriptions.lock().unwrap();

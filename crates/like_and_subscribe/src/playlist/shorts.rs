@@ -65,7 +65,7 @@ pub async fn check_redirect(
             client
                 .head(format!("https://www.youtube.com/shorts/{}", video_id))
                 .build()
-                .unwrap(),
+                .expect("request should be well formed"),
         )
         .await;
 

@@ -7,27 +7,30 @@ use std::{
 };
 
 use color_eyre::eyre::{Context, eyre};
+use entity::prelude::FeedItem;
 use google_youtube3::{
     YouTube,
     yup_oauth2::{self, ConsoleApplicationSecret},
 };
-use opentelemetry::trace::TracerProvider;
-use opentelemetry_sdk::trace::SdkTracerProvider;
+use migration::{Migrator, MigratorTrait as _};
 use reqwest::redirect::Policy;
+use sea_orm::{Database, DatabaseConnection, EntityTrait};
+use tokio::signal::unix::SignalKind;
 use tower::ServiceBuilder;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 use crate::{
     playlist::youtube_playlist_modifier,
-    pubsub::youtube_pubsub_reciever,
     subscription::{YoutubeChannelSubscription, youtube_subscription_manager},
+    web::web_server,
 };
 
 pub mod feed;
 pub mod playlist;
 pub mod pubsub;
 pub mod subscription;
+pub mod web;
 
 // TODO: FIXME: log/store bad XML feed items or something for debugging (due to "missing field `@xmlns:yt`")
 // TODO: FIXME: better token refreshing (send an email or something)
@@ -38,18 +41,12 @@ pub mod subscription;
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
-    let opentelemetry_provider = SdkTracerProvider::builder()
-        .with_batch_exporter(
-            opentelemetry_otlp::SpanExporter::builder()
-                .with_tonic()
-                .build()
-                .expect("otlp span exporter should be correctly configured"),
-        )
-        .build();
-
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
-        .with(tracing_opentelemetry::layer().with_tracer(opentelemetry_provider.tracer("tracing")))
+        .with(
+            tracing_journald::layer()
+                .wrap_err("tracing journald subscriber failed to initialize")?,
+        )
         .with(ErrorLayer::default())
         .with(EnvFilter::from_default_env())
         .init();
@@ -59,6 +56,18 @@ async fn main() -> color_eyre::Result<()> {
     tracing::info!("a");
     tracing::warn!("a");
     tracing::error!("a");
+
+    let db: DatabaseConnection = Database::connect("sqlite://database.sqlite?mode=rwc")
+        .await
+        .wrap_err("unable to open database file")?;
+
+    // Apply all pending migrations
+    Migrator::up(&db, None).await?;
+
+    let a = FeedItem::find()
+        .find_also_related(entity::prelude::Videos)
+        .all(&db)
+        .await;
 
     let google_client_secret: ConsoleApplicationSecret = serde_json::from_reader(BufReader::new(
         File::open(
@@ -106,17 +115,21 @@ async fn main() -> color_eyre::Result<()> {
     .persist_tokens_to_disk("./tokens.json")
     .build()
     .await
-    .unwrap();
+    .wrap_err("failed to setup authenticator")?;
+
+    panic!();
+
+    // scopes: "https://www.googleapis.com/auth/youtube.readonly",            "https://www.googleapis.com/auth/youtube"
 
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
-        .unwrap();
+        .map_err(|_| eyre!("crypto provider already initialized"))?;
     // TODO: make sure using gzip (or other compression)
     let hyper_client =
         hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build(
             hyper_rustls::HttpsConnectorBuilder::new()
                 .with_native_roots()
-                .unwrap()
+                .wrap_err("unable to use native roots")?
                 .https_only()
                 .enable_http1()
                 .enable_http2()
@@ -137,11 +150,7 @@ async fn main() -> color_eyre::Result<()> {
 
     let (shutdown, _) = tokio::sync::broadcast::channel(1);
 
-    let mut pubsub_task = tokio::spawn(youtube_pubsub_reciever(
-        shutdown.subscribe(),
-        new_video_sender,
-        subscriptions.clone(),
-    ));
+    let mut pubsub_task = tokio::spawn(web_server(shutdown.subscribe()));
     let mut playlist_task = tokio::spawn(youtube_playlist_modifier(
         shutdown.subscribe(),
         client.clone(),
@@ -157,11 +166,21 @@ async fn main() -> color_eyre::Result<()> {
         youtube,
         subscriptions,
     ));
+    let mut sigint_task = tokio::signal::unix::signal(SignalKind::interrupt()).unwrap();
+    let mut sigquit_task = tokio::signal::unix::signal(SignalKind::quit()).unwrap();
+    let mut sighup_task = tokio::signal::unix::signal(SignalKind::hangup()).unwrap();
+    let mut sigterm_task = tokio::signal::unix::signal(SignalKind::terminate()).unwrap();
+
+    // TODO: re-spawn failed tasks?
 
     tokio::select! {
         result = &mut pubsub_task => tracing::error!(?result, "pubsub task exited"),
         result = &mut playlist_task => tracing::error!(?result, "playlist task exited"),
         result = &mut subscription_task => tracing::error!(?result, "subscription task exited"),
+        Some(_) = sigint_task.recv() => tracing::warn!("Received signal INTERRUPT. Exiting"),
+        Some(_) = sigquit_task.recv() => tracing::warn!("Received signal QUIT. Exiting"),
+        Some(_) = sighup_task.recv() => tracing::warn!("Received signal HANGUP. Exiting"),
+        Some(_) = sigterm_task.recv() => tracing::warn!("Received signal TERMINATE. Exiting"),
     }
 
     let _ = shutdown.send(());

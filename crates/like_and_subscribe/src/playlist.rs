@@ -48,7 +48,7 @@ pub async fn youtube_playlist_modifier(
 
                 match subscriptions
                     .lock()
-                    .unwrap()
+                    .expect("mutex should not be poisoned")
                     .entry(entry.channel_id.clone())
                 {
                     Entry::Occupied(occupied_entry) => {
@@ -72,7 +72,7 @@ pub async fn youtube_playlist_modifier(
 
                 let video_age_minutes = (entry.updated - entry.published)
                     .total((Unit::Minute, entry.updated))
-                    .unwrap();
+                    .expect("span arithmatic should not overflow");
 
                 span.record("video_age_minutes", video_age_minutes);
 
