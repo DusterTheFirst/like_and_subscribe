@@ -1,6 +1,7 @@
 [workspace]
-resolver = "3"
-members  = ["crates/*"]
+resolver        = "3"
+members         = ["crates/*"]
+default-members = ["crates/like_and_subscribe"]
 
 [workspace.dependencies]
 migration           = { version = "0.1.0", path = "crates/migration" }
@@ -14,4 +15,4 @@ serde_derive = "1.0.219"
 jiff         = { version = "0.2.15", features = ["serde"] }
 
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-color-eyre = "0.6.5"
+color-eyre         = "0.6.5"

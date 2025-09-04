@@ -13,15 +13,14 @@ use axum::{
 };
 use axum_extra::{TypedHeader, routing::RouterExt};
 use color_eyre::eyre::Context as _;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
 
-pub async fn web_server(
-    mut shutdown: tokio::sync::broadcast::Receiver<()>,
-) -> color_eyre::Result<()> {
+pub async fn web_server(mut shutdown: CancellationToken) -> color_eyre::Result<()> {
     let admin_files =
         std::env::var_os("ADMIN_PANEL_FILES").expect("ADMIN_PANEL_FILES should be set");
     let admin_files = Path::new(&admin_files);
@@ -56,9 +55,7 @@ pub async fn web_server(
             .wrap_err("unable to bind to port 8080")?,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(async move {
-        let _ = shutdown.recv().await;
-    })
+    .with_graceful_shutdown(async move { shutdown.cancelled().await })
     .await
     .wrap_err("failed to run axum server")
 }
