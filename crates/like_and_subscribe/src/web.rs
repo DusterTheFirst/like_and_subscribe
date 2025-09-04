@@ -1,18 +1,15 @@
-use std::{
-    net::SocketAddr,
-    path::{Path, PathBuf},
-};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::{
-    body::Body,
     extract::Request,
-    http::{HeaderMap, Response},
     middleware::{self, Next},
     response::IntoResponse,
     routing::method_routing,
 };
-use axum_extra::{TypedHeader, routing::RouterExt};
+use axum_extra::routing::RouterExt;
 use color_eyre::eyre::Context as _;
+use sea_orm::DatabaseConnection;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tower_http::{
@@ -20,15 +17,19 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-pub async fn web_server(mut shutdown: CancellationToken) -> color_eyre::Result<()> {
-    let admin_files =
-        std::env::var_os("ADMIN_PANEL_FILES").expect("ADMIN_PANEL_FILES should be set");
-    let admin_files = Path::new(&admin_files);
+mod pubsub;
 
-    let admin_router = method_routing::get_service(ServeDir::new(admin_files).fallback(
-        ServeFile::new(PathBuf::from_iter([admin_files, Path::new("index.html")])),
-    ))
+pub async fn web_server(
+    shutdown: CancellationToken,
+    database: DatabaseConnection,
+    video_queue_notify: Arc<Notify>,
+    admin_files: PathBuf,
+) -> color_eyre::Result<()> {
+    let admin_router = method_routing::get_service(
+        ServeDir::new(&admin_files).fallback(ServeFile::new(admin_files.join("index.html"))),
+    )
     .route_layer(middleware::from_fn(|req: Request, next: Next| async {
+        // TODO: Verify that these are filtered by tailscale funnel
         if req.headers().contains_key("Tailscale-User-Login") {
             next.run(req).await
         } else {
@@ -38,10 +39,10 @@ pub async fn web_server(mut shutdown: CancellationToken) -> color_eyre::Result<(
 
     let router = axum::Router::new()
         .route_with_tsr("/pubsub", {
-            method_routing::get(crate::pubsub::pubsub_subscription)
-                .with_state(subscriptions.clone())
-                .post(crate::pubsub::pubsub_new_upload)
-                .with_state(new_video_channel)
+            method_routing::get(pubsub::pubsub_subscription_validation)
+                .with_state(database.clone())
+                .post(pubsub::pubsub_new_upload)
+                .with_state((database, video_queue_notify))
         })
         .nest_service("/admin", admin_router)
         .fallback(method_routing::any(|| async {

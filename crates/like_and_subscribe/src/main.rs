@@ -1,4 +1,4 @@
-use std::{fs::File, io::BufReader, sync::Arc, time::Duration};
+use std::{fs::File, io::BufReader, path::PathBuf, sync::Arc, time::Duration};
 
 use color_eyre::eyre::Context;
 use migration::{Migrator, MigratorTrait as _};
@@ -10,16 +10,14 @@ use tower::ServiceBuilder;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
-use crate::oauth::ApplicationSecretFile;
+use crate::{oauth::ApplicationSecretFile, web::web_server};
 
 pub mod feed;
 pub mod oauth;
 // pub mod playlist;
-// pub mod pubsub;
 // pub mod subscription;
-// pub mod web;
+pub mod web;
 
-// TODO: FIXME: log/store bad XML feed items or something for debugging (due to "missing field `@xmlns:yt`")
 // TODO: FIXME: better token refreshing (send an email or something)
 // TODO: FIXME: local tailnet vs external tailnet URLs. Basically only pubsub should be external
 // TODO: https://github.com/stalwartlabs/mail-send https://github.com/stalwartlabs/mail-builder
@@ -60,6 +58,10 @@ async fn main() -> color_eyre::Result<()> {
     let hostname =
         std::env::var("PUBSUB_HOSTNAME").wrap_err("Unable to read PUBSUB_HOSTNAME env var")?;
 
+    let admin_files =
+        std::env::var_os("ADMIN_PANEL_FILES").expect("ADMIN_PANEL_FILES should be set");
+    let admin_files = PathBuf::from(admin_files);
+
     // TODO: lettre notifications to fastmail w/ sorting to a special folder for problems
     let client = reqwest::ClientBuilder::new()
         .https_only(true)
@@ -73,12 +75,12 @@ async fn main() -> color_eyre::Result<()> {
         .build()
         .wrap_err("Unable to setup reqwest client")?;
 
-    let db: DatabaseConnection = Database::connect("sqlite://database.sqlite?mode=rwc")
+    let database: DatabaseConnection = Database::connect("sqlite://database.sqlite?mode=rwc")
         .await
         .wrap_err("unable to open database file")?;
 
     // Apply all pending migrations
-    Migrator::up(&db, None).await?;
+    Migrator::up(&database, None).await?;
 
     // TODO: https://docs.rs/google-apis-common/latest/google_apis_common/auth/index.html
     // TODO: https://developers.google.com/youtube/v3/guides/moving_to_oauth#using-oauth-2.0-for-server-side,-standalone-scripts
@@ -89,24 +91,29 @@ async fn main() -> color_eyre::Result<()> {
 
     // scopes: "https://www.googleapis.com/auth/youtube.readonly",            "https://www.googleapis.com/auth/youtube"
 
-    let subscriptions_queue_notify = Arc::new(Notify::const_new());
-    let video_queue_notify = Arc::new(Notify::const_new());
-
     // TODO: some way to verify that the subscriptions are actually subscribed, maybe once a day?
     // https://pubsubhubbub.appspot.com/subscription-details?hub.callback=https%3A%2F%2Flenovo-fedora.taila5e2a.ts.net%2Fpubsub&hub.topic=https%3A%2F%2Fwww.youtube.com%2Fxml%2Ffeeds%2Fvideos.xml%3Fchannel_id%3DUCHtv-7yDeac7OSfPJA_a6aA&hub.secret=
+
+    let subscriptions_queue_notify = Arc::new(Notify::const_new());
+    let video_queue_notify = Arc::new(Notify::const_new());
 
     let shutdown = CancellationToken::new();
 
     let tasks = TaskTracker::new();
 
     // Unauthenticated services
-    let mut web_server_task = tasks.spawn(async {});
-    let mut pubsubhubbub_queue_task = tasks.spawn(async {});
-    let mut pubsubhubbub_refresh_task = tasks.spawn(async {});
+    let mut web_server_task = tasks.spawn(web_server(
+        shutdown.clone(),
+        database,
+        video_queue_notify,
+        admin_files,
+    ));
+    // let mut pubsubhubbub_queue_task = tasks.spawn(async {});
+    // let mut pubsubhubbub_refresh_task = tasks.spawn(async {});
 
     // Authenticated services
-    let mut subscription_task = tasks.spawn(async {});
-    let mut video_task = tasks.spawn(async {});
+    // let mut subscription_task = tasks.spawn(async {});
+    // let mut video_task = tasks.spawn(async {});
 
     // Shutdown signals
     let mut sigint_task = tokio::signal::unix::signal(SignalKind::interrupt()).unwrap();
@@ -134,11 +141,11 @@ async fn main() -> color_eyre::Result<()> {
     // TODO: re-spawn failed tasks?
     tokio::select! {
         result = &mut web_server_task => tracing::error!(?result, "web server task exited"),
-        result = &mut pubsubhubbub_queue_task => tracing::error!(?result, "pusubhubbub queue task exited"),
-        result = &mut pubsubhubbub_refresh_task => tracing::error!(?result, "pubsubhubbub refresh task exited"),
+        // result = &mut pubsubhubbub_queue_task => tracing::error!(?result, "pusubhubbub queue task exited"),
+        // result = &mut pubsubhubbub_refresh_task => tracing::error!(?result, "pubsubhubbub refresh task exited"),
 
-        result = &mut subscription_task => tracing::error!(?result, "subscription task exited"),
-        result = &mut video_task => tracing::error!(?result, "video task exited"),
+        // result = &mut subscription_task => tracing::error!(?result, "subscription task exited"),
+        // result = &mut video_task => tracing::error!(?result, "video task exited"),
 
         _ = shutdown_signal() => tracing::warn!("User requested exit"),
     }

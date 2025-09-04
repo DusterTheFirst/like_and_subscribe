@@ -1,4 +1,4 @@
-use jiff::civil::DateTime;
+use jiff::Timestamp;
 use monostate::MustBe;
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +33,6 @@ pub struct Entry {
     #[serde(alias = "channelId")] // quick_xml ignores namespace prefixes with serde
     pub channel_id: String,
     pub title: String,
-    pub published: DateTime,
-    pub updated: DateTime,
+    pub published: Timestamp,
+    pub updated: Timestamp,
 }

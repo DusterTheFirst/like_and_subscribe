@@ -11,6 +11,8 @@ pub struct Model {
     pub channel_id: String,
     #[sea_orm(column_type = "Text")]
     pub video_id: String,
+    #[sea_orm(column_type = "Text")]
+    pub title: String,
     pub published_at: jiff_sea_orm_compat::JiffTimestampMilliseconds,
     pub updated_at: jiff_sea_orm_compat::JiffTimestampMilliseconds,
     pub timestamp: jiff_sea_orm_compat::JiffTimestampMilliseconds,

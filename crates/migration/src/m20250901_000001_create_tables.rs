@@ -178,6 +178,7 @@ enum VideoQueue {
 
     ChannelId,
     VideoId,
+    Title,
     PublishedAt,
     UpdatedAt,
     Timestamp,
@@ -203,6 +204,7 @@ impl TableTrait for VideoQueue {
                     .from(VideoQueue::Table, VideoQueue::VideoId)
                     .to(KnownVideos::Table, KnownVideos::VideoId),
             )
+            .col(schema::text(VideoQueue::Title))
             .col(schema::big_integer(VideoQueue::PublishedAt))
             .col(schema::big_integer(VideoQueue::UpdatedAt))
             .col(schema::big_integer(VideoQueue::Timestamp))
