@@ -1,4 +1,4 @@
-use std::{fs::File, io::BufReader, path::PathBuf, sync::Arc, time::Duration};
+use std::{fs::File, io::BufReader, sync::Arc, time::Duration};
 
 use color_eyre::eyre::Context;
 use migration::{Migrator, MigratorTrait as _};
@@ -58,10 +58,6 @@ async fn main() -> color_eyre::Result<()> {
     let hostname =
         std::env::var("PUBSUB_HOSTNAME").wrap_err("Unable to read PUBSUB_HOSTNAME env var")?;
 
-    let admin_files =
-        std::env::var_os("ADMIN_PANEL_FILES").expect("ADMIN_PANEL_FILES should be set");
-    let admin_files = PathBuf::from(admin_files);
-
     // TODO: lettre notifications to fastmail w/ sorting to a special folder for problems
     let client = reqwest::ClientBuilder::new()
         .https_only(true)
@@ -102,12 +98,8 @@ async fn main() -> color_eyre::Result<()> {
     let tasks = TaskTracker::new();
 
     // Unauthenticated services
-    let mut web_server_task = tasks.spawn(web_server(
-        shutdown.clone(),
-        database,
-        video_queue_notify,
-        admin_files,
-    ));
+    let mut web_server_task =
+        tasks.spawn(web_server(shutdown.clone(), database, video_queue_notify));
     // let mut pubsubhubbub_queue_task = tasks.spawn(async {});
     // let mut pubsubhubbub_refresh_task = tasks.spawn(async {});
 
