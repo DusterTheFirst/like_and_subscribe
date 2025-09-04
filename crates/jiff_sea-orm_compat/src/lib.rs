@@ -48,7 +48,11 @@ impl TryGetable for JiffTimestampMilliseconds {
         res: &sea_orm::QueryResult,
         index: I,
     ) -> Result<Self, sea_orm::TryGetError> {
-        res.try_get_by_nullable(index)
+        i64::try_get_by(res, index).and_then(|int| {
+            jiff::Timestamp::from_second(int)
+                .map_err(|e| sea_orm::TryGetError::DbErr(sea_orm::DbErr::Type(e.to_string())))
+                .map(JiffTimestampMilliseconds)
+        })
     }
 }
 
@@ -97,6 +101,7 @@ impl TryGetable for JiffSignedDurationSeconds {
         res: &sea_orm::QueryResult,
         index: I,
     ) -> Result<Self, sea_orm::TryGetError> {
-        res.try_get_by_nullable(index)
+        i64::try_get_by(res, index)
+            .map(|int| JiffSignedDurationSeconds(jiff::SignedDuration::from_secs(int)))
     }
 }
