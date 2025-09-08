@@ -2,20 +2,16 @@ use std::{str::FromStr as _, sync::Arc};
 
 use axum::extract::{Query, State, rejection::QueryRejection};
 use axum_extra::{TypedHeader, headers::ContentType};
-use jiff::Timestamp;
 use jiff::Zoned;
-use jiff_sea_orm_compat::JiffTimestampMilliseconds;
 use mime::Mime;
 use quick_xml::DeError;
 use reqwest::StatusCode;
-use sea_orm::ActiveValue;
 use sea_orm::DatabaseConnection;
-use sea_orm::EntityTrait;
-use sea_orm::IntoActiveModel;
 use serde::Deserialize;
 use tokio::sync::Notify;
 use tracing::warn;
 
+use crate::database::{ActiveSubscriptions, VideoQueue};
 use crate::feed::Feed;
 
 #[derive(Debug, Deserialize)]
@@ -45,7 +41,7 @@ pub struct HubUnsubscribeChallenge {
     pub(crate) challenge: String,
 }
 
-fn channel_id_from_topic(topic: &str) -> &str {
+fn channel_id_from_topic_url(topic: &str) -> &str {
     topic
         // FIXME: poor man's url parser
         .trim_start_matches("https://www.youtube.com/xml/feeds/videos.xml?channel_id=")
@@ -57,10 +53,10 @@ pub async fn pubsub_subscription_validation(
 ) -> Result<String, StatusCode> {
     match query {
         Ok(Query(HubChallenge::Unsubscribe(query))) => {
-            let database_result = entity::active_subscriptions::Entity::delete_by_id(
-                channel_id_from_topic(&query.topic).to_owned(),
+            let database_result = ActiveSubscriptions::remove_subscription(
+                &database,
+                channel_id_from_topic_url(&query.topic).to_owned(),
             )
-            .exec(&database)
             .await;
 
             match database_result {
@@ -72,7 +68,7 @@ pub async fn pubsub_subscription_validation(
             }
         }
         Ok(Query(HubChallenge::Subscribe(query))) => {
-            let channel_id = channel_id_from_topic(&query.topic);
+            let channel_id = channel_id_from_topic_url(&query.topic);
 
             let expiration = Zoned::now()
                 .saturating_add(
@@ -85,15 +81,9 @@ pub async fn pubsub_subscription_validation(
                 )
                 .timestamp();
 
-            let database_result = entity::active_subscriptions::Entity::insert(
-                entity::active_subscriptions::Model {
-                    channel_id: channel_id.to_owned(),
-                    expiration: JiffTimestampMilliseconds(expiration),
-                }
-                .into_active_model(),
-            )
-            .exec(&database)
-            .await;
+            let database_result =
+                ActiveSubscriptions::add_subscription(&database, channel_id.to_owned(), expiration)
+                    .await;
 
             match database_result {
                 Ok(_) => Ok(query.challenge),
@@ -139,20 +129,7 @@ pub async fn pubsub_new_upload(
         }
     };
 
-    let database_result = entity::video_queue::Entity::insert(entity::video_queue::ActiveModel {
-        id: ActiveValue::NotSet,
-        channel_id: ActiveValue::Set(feed.entry.channel_id),
-        video_id: ActiveValue::Set(feed.entry.video_id),
-
-        title: ActiveValue::Set(feed.entry.title),
-
-        published_at: ActiveValue::Set(JiffTimestampMilliseconds(feed.entry.published)),
-        updated_at: ActiveValue::Set(JiffTimestampMilliseconds(feed.entry.updated)),
-
-        timestamp: ActiveValue::Set(JiffTimestampMilliseconds(Timestamp::now())),
-    })
-    .exec(&database)
-    .await;
+    let database_result = VideoQueue::new_video(&database, feed.entry).await;
 
     if let Err(error) = database_result {
         tracing::error!(%error, "failed to insert video into queue");

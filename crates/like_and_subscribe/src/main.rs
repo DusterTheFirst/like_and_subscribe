@@ -17,6 +17,7 @@ pub mod oauth;
 // pub mod playlist;
 // pub mod subscription;
 pub mod web;
+pub mod database;
 
 // TODO: FIXME: better token refreshing (send an email or something)
 // TODO: FIXME: local tailnet vs external tailnet URLs. Basically only pubsub should be external
