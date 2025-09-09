@@ -11,7 +11,7 @@ pub struct Model {
     pub access_token: String,
     #[sea_orm(column_type = "Text")]
     pub refresh_token: String,
-    pub expires_at: jiff_sea_orm_compat::JiffTimestampMilliseconds,
+    pub expires_at: entity_types::jiff_compat::JiffTimestampMilliseconds,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

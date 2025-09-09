@@ -4,9 +4,9 @@ members         = ["crates/*"]
 default-members = ["crates/like_and_subscribe"]
 
 [workspace.dependencies]
-migration           = { version = "0.1.0", path = "crates/migration" }
-entity              = { version = "0.1.0", path = "crates/entity" }
-jiff_sea-orm_compat = { version = "0.1.0", path = "crates/jiff_sea-orm_compat" }
+migration    = { version = "0.1.0", path = "crates/migration" }
+entity       = { version = "0.1.0", path = "crates/entity" }
+entity_types = { version = "0.1.0", path = "crates/entity_types" }
 
 tokio        = { version = "1.47.0", features = ["full"] }
 sea-orm      = { version = "1.1.14", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-sqlite"] }

@@ -1,4 +1,4 @@
-use sea_orm_migration::{prelude::*, schema, sea_orm::EnumIter};
+use sea_orm_migration::{prelude::*, schema};
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -11,6 +11,9 @@ impl MigrationTrait for Migration {
         manager.create_table(KnownVideos::create()).await?;
         manager.create_table(ActiveSubscriptions::create()).await?;
         manager.create_table(SubscriptionQueue::create()).await?;
+        manager
+            .create_table(SubscriptionQueueResult::create())
+            .await?;
         manager.create_table(VideoQueue::create()).await?;
         manager.create_table(VideoQueueResult::create()).await?;
 
@@ -32,6 +35,13 @@ impl MigrationTrait for Migration {
             .await?;
         manager
             .drop_table(Table::drop().table(SubscriptionQueue::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(SubscriptionQueueResult::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
             .drop_table(Table::drop().table(VideoQueue::Table).to_owned())
@@ -148,8 +158,8 @@ enum SubscriptionQueue {
     Id,
 
     ChannelId,
-    Timestamp,
     Action,
+    Timestamp,
 }
 
 impl TableTrait for SubscriptionQueue {
@@ -165,8 +175,36 @@ impl TableTrait for SubscriptionQueue {
                     .from(SubscriptionQueue::Table, SubscriptionQueue::ChannelId)
                     .to(KnownChannels::Table, KnownChannels::ChannelId),
             )
-            .col(schema::big_integer(SubscriptionQueue::Timestamp))
             .col(schema::text(SubscriptionQueue::Action))
+            .col(schema::big_integer(SubscriptionQueue::Timestamp))
+            .to_owned()
+    }
+}
+
+#[derive(DeriveIden)]
+enum SubscriptionQueueResult {
+    Table,
+    QueueId,
+
+    Error,
+}
+
+impl TableTrait for SubscriptionQueueResult {
+    fn create() -> TableCreateStatement {
+        Table::create()
+            .table(SubscriptionQueueResult::Table)
+            .if_not_exists()
+            .col(schema::integer(SubscriptionQueueResult::QueueId).primary_key())
+            .foreign_key(
+                ForeignKey::create()
+                    .name("fk-subscription_queue_result-queue_id")
+                    .from(
+                        SubscriptionQueueResult::Table,
+                        SubscriptionQueueResult::QueueId,
+                    )
+                    .to(SubscriptionQueue::Table, SubscriptionQueue::Id),
+            )
+            .col(schema::text_null(SubscriptionQueueResult::Error))
             .to_owned()
     }
 }
@@ -243,14 +281,4 @@ impl TableTrait for VideoQueueResult {
             .col(schema::big_integer(VideoQueueResult::Timestamp))
             .to_owned()
     }
-}
-
-// TODO: FIXME:
-#[derive(Iden, EnumIter)]
-pub enum Action {
-    Add,
-    SkipShort,
-    SkipInPlaylist,
-    SkipInDatabase,
-    SkipPrivate,
 }

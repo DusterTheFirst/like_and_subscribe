@@ -9,9 +9,8 @@ pub struct Model {
     pub id: i32,
     #[sea_orm(column_type = "Text")]
     pub channel_id: String,
-    pub timestamp: jiff_sea_orm_compat::JiffTimestampMilliseconds,
-    #[sea_orm(column_type = "Text")]
-    pub action: String,
+    pub action: entity_types::subscription_queue::SubscriptionAction,
+    pub timestamp: entity_types::jiff_compat::JiffTimestampMilliseconds,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -24,11 +23,19 @@ pub enum Relation {
         on_delete = "NoAction"
     )]
     KnownChannels,
+    #[sea_orm(has_one = "super::subscription_queue_result::Entity")]
+    SubscriptionQueueResult,
 }
 
 impl Related<super::known_channels::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::KnownChannels.def()
+    }
+}
+
+impl Related<super::subscription_queue_result::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::SubscriptionQueueResult.def()
     }
 }
 

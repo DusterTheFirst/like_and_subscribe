@@ -5,5 +5,6 @@ pub use super::known_channels::Entity as KnownChannels;
 pub use super::known_videos::Entity as KnownVideos;
 pub use super::o_auth::Entity as OAuth;
 pub use super::subscription_queue::Entity as SubscriptionQueue;
+pub use super::subscription_queue_result::Entity as SubscriptionQueueResult;
 pub use super::video_queue::Entity as VideoQueue;
 pub use super::video_queue_result::Entity as VideoQueueResult;
