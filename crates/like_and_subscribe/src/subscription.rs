@@ -18,32 +18,6 @@ use reqwest::{StatusCode, header};
 use serde::{Deserialize, Serialize};
 use tracing::{Instrument, debug, debug_span, error, info, trace, warn};
 
-#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    Subscribe,
-    Unsubscribe,
-}
-
-#[derive(Debug, Serialize)]
-pub struct HubRequest<'s> {
-    #[serde(rename = "hub.topic")]
-    pub(crate) topic: String,
-    #[serde(rename = "hub.callback")]
-    pub(crate) callback: &'s str,
-    #[serde(rename = "hub.mode")]
-    pub(crate) mode: Mode,
-    #[serde(rename = "hub.verify")]
-    pub(crate) verify: Verify,
-}
-
-#[derive(Debug, Serialize, Clone, Copy)]
-pub enum Verify {
-    #[serde(rename = "async")]
-    Asynchronous,
-    #[serde(rename = "sync")]
-    Synchronous,
-}
 
 #[derive(Debug, Default, Serialize, Clone)]
 pub struct YoutubeChannelSubscription {
@@ -125,52 +99,52 @@ pub async fn youtube_subscription_manager(
                         .map(|(a, b)| (Mode::Subscribe, (a.clone(), b.clone()))),
                 );
 
-                stream::iter(action_queue).for_each_concurrent(10, |(mode, (channel_id, YoutubeChannelSubscription { name, .. }))| {
-                    let client = client.clone();
+                // stream::iter(action_queue).for_each_concurrent(10, |(mode, (channel_id, YoutubeChannelSubscription { name, .. }))| {
+                //     let client = client.clone();
 
-                    let span = debug_span!("subscription_update", channel_id, name, ?mode);
+                //     let span = debug_span!("subscription_update", channel_id, name, ?mode);
 
-                    // TODO: make this a function?
-                    async move {
-                        let request = client
-                            .post("https://pubsubhubbub.appspot.com/subscribe")
-                            .form(&HubRequest {
-                                mode,
-                                callback,
-                                verify: Verify::Synchronous,
-                                topic: format!(
-                                    "https://www.youtube.com/xml/feeds/videos.xml?channel_id={channel_id}"
-                                ),
-                            })
-                            .build()
-                            .expect("request should be well formed");
+                //     // TODO: make this a function?
+                //     async move {
+                //         let request = client
+                //             .post("https://pubsubhubbub.appspot.com/subscribe")
+                //             .form(&HubRequest {
+                //                 mode,
+                //                 callback,
+                //                 verify: Verify::Synchronous,
+                //                 topic: format!(
+                //                     "https://www.youtube.com/xml/feeds/videos.xml?channel_id={channel_id}"
+                //                 ),
+                //             })
+                //             .build()
+                //             .expect("request should be well formed");
 
-                        let response = match client.execute(request).await {
-                            Ok(response) => response,
-                            Err(error) => {
-                                // TODO: implement retries? put back on the queue?
-                                // TODO: keep track of subscribed channels?? how do we know whats new?
-                                warn!(%error, "failed to subscribe to a youtube channel");
-                                return;
-                            }
-                        };
+                //         let response = match client.execute(request).await {
+                //             Ok(response) => response,
+                //             Err(error) => {
+                //                 // TODO: implement retries? put back on the queue?
+                //                 // TODO: keep track of subscribed channels?? how do we know whats new?
+                //                 warn!(%error, "failed to subscribe to a youtube channel");
+                //                 return;
+                //             }
+                //         };
 
-                        if response.status() == StatusCode::TOO_MANY_REQUESTS {
-                            // TODO: retries from too many requests
-                            error!("too many requests");
-                            return;
-                        }
+                //         if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                //             // TODO: retries from too many requests
+                //             error!("too many requests");
+                //             return;
+                //         }
 
-                        if !response.status().is_success() {
-                            let status_code = response.status().as_u16();
-                            warn!(status_code, "server returned error");
-                            return;
-                        }
+                //         if !response.status().is_success() {
+                //             let status_code = response.status().as_u16();
+                //             warn!(status_code, "server returned error");
+                //             return;
+                //         }
 
-                        trace!("updated subscription")
-                    }
-                    .instrument(span)
-                }).await;
+                //         trace!("updated subscription")
+                //     }
+                //     .instrument(span)
+                // }).await;
             }
 
             let subscriptions = subscriptions.lock().unwrap();

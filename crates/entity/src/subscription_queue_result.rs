@@ -9,6 +9,7 @@ pub struct Model {
     pub queue_id: i32,
     #[sea_orm(column_type = "Text", nullable)]
     pub error: Option<String>,
+    pub timestamp: entity_types::jiff_compat::JiffTimestampMilliseconds,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -10,14 +10,20 @@ use tower::ServiceBuilder;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
-use crate::{oauth::ApplicationSecretFile, web::web_server};
+use crate::{
+    actor::{
+        pubsubhubbub::{pubsub_queue_consumer, pubsub_refresh},
+        web::web_server,
+    },
+    oauth::ApplicationSecretFile,
+};
 
-pub mod feed;
-pub mod oauth;
-// pub mod playlist;
-// pub mod subscription;
-pub mod web;
-pub mod database;
+mod feed;
+mod oauth;
+//  mod playlist;
+//  mod subscription;
+mod actor;
+mod database;
 
 // TODO: FIXME: better token refreshing (send an email or something)
 // TODO: FIXME: local tailnet vs external tailnet URLs. Basically only pubsub should be external
@@ -91,6 +97,8 @@ async fn main() -> color_eyre::Result<()> {
     // TODO: some way to verify that the subscriptions are actually subscribed, maybe once a day?
     // https://pubsubhubbub.appspot.com/subscription-details?hub.callback=https%3A%2F%2Flenovo-fedora.taila5e2a.ts.net%2Fpubsub&hub.topic=https%3A%2F%2Fwww.youtube.com%2Fxml%2Ffeeds%2Fvideos.xml%3Fchannel_id%3DUCHtv-7yDeac7OSfPJA_a6aA&hub.secret=
 
+    let pubsubhubbub_callback = format!("https://{hostname}/pubsub");
+
     let subscriptions_queue_notify = Arc::new(Notify::const_new());
     let video_queue_notify = Arc::new(Notify::const_new());
 
@@ -99,10 +107,23 @@ async fn main() -> color_eyre::Result<()> {
     let tasks = TaskTracker::new();
 
     // Unauthenticated services
-    let mut web_server_task =
-        tasks.spawn(web_server(shutdown.clone(), database, video_queue_notify));
-    // let mut pubsubhubbub_queue_task = tasks.spawn(async {});
-    // let mut pubsubhubbub_refresh_task = tasks.spawn(async {});
+    let mut web_server_task = tasks.spawn(web_server(
+        shutdown.clone(),
+        database.clone(),
+        video_queue_notify.clone(),
+    ));
+    let mut pubsubhubbub_queue_task = tasks.spawn(pubsub_queue_consumer(
+        shutdown.clone(),
+        database.clone(),
+        subscriptions_queue_notify.clone(),
+        client.clone(),
+        pubsubhubbub_callback,
+    ));
+    let mut pubsubhubbub_refresh_task = tasks.spawn(pubsub_refresh(
+        shutdown.clone(),
+        database.clone(),
+        subscriptions_queue_notify.clone(),
+    ));
 
     // Authenticated services
     // let mut subscription_task = tasks.spawn(async {});
@@ -134,8 +155,8 @@ async fn main() -> color_eyre::Result<()> {
     // TODO: re-spawn failed tasks?
     tokio::select! {
         result = &mut web_server_task => tracing::error!(?result, "web server task exited"),
-        // result = &mut pubsubhubbub_queue_task => tracing::error!(?result, "pusubhubbub queue task exited"),
-        // result = &mut pubsubhubbub_refresh_task => tracing::error!(?result, "pubsubhubbub refresh task exited"),
+        result = &mut pubsubhubbub_queue_task => tracing::error!(?result, "pusubhubbub queue task exited"),
+        result = &mut pubsubhubbub_refresh_task => tracing::error!(?result, "pubsubhubbub refresh task exited"),
 
         // result = &mut subscription_task => tracing::error!(?result, "subscription task exited"),
         // result = &mut video_task => tracing::error!(?result, "video task exited"),

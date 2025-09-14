@@ -187,6 +187,7 @@ enum SubscriptionQueueResult {
     QueueId,
 
     Error,
+    Timestamp,
 }
 
 impl TableTrait for SubscriptionQueueResult {
@@ -205,6 +206,7 @@ impl TableTrait for SubscriptionQueueResult {
                     .to(SubscriptionQueue::Table, SubscriptionQueue::Id),
             )
             .col(schema::text_null(SubscriptionQueueResult::Error))
+            .col(schema::big_integer(SubscriptionQueueResult::Timestamp))
             .to_owned()
     }
 }
