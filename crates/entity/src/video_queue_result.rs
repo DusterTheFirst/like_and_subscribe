@@ -12,7 +12,7 @@ pub struct Model {
     pub shorts_redirect: bool,
     #[sea_orm(column_type = "Text")]
     pub visibility: String,
-    pub duration: entity_types::jiff_compat::JiffTimestampMilliseconds,
+    pub duration: entity_types::jiff_compat::JiffSignedDurationSeconds,
     pub timestamp: entity_types::jiff_compat::JiffTimestampMilliseconds,
 }
 

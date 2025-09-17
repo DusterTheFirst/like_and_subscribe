@@ -1,18 +1,18 @@
-use std::error::Error;
+use std::{collections::HashSet, error::Error};
 
 use entity::{
-    SubscriptionQueueToActiveSubscriptions, active_subscriptions, subscription_queue,
-    subscription_queue_result, video_queue,
+    SubscriptionQueueToActiveSubscriptions, active_subscriptions, known_channels, o_auth,
+    subscription_queue, subscription_queue_result, video_queue,
 };
 use entity_types::{
     jiff_compat::JiffTimestampMilliseconds, subscription_queue::SubscriptionAction,
 };
 use futures::{Stream, TryStreamExt};
-use jiff::{SignedDuration, Timestamp};
+use jiff::Timestamp;
 use migration::OnConflict;
 use sea_orm::{
-    ActiveValue, ColumnTrait as _, DatabaseConnection, DbErr, EntityTrait as _,
-    IntoActiveModel as _, Iterable, QueryFilter, QuerySelect,
+    ActiveValue, ColumnTrait as _, DatabaseConnection, DbErr, EntityTrait as _, IntoActiveModel,
+    Iterable, QueryFilter, QuerySelect,
 };
 use tokio::sync::Notify;
 
@@ -80,10 +80,11 @@ impl ActiveSubscriptions {
     ) -> Result<Option<Timestamp>, DbErr> {
         Ok(active_subscriptions::Entity::find()
             .select_only()
-            .column_as(active_subscriptions::Column::Expiration.min(), "expiration")
-            .into_tuple::<JiffTimestampMilliseconds>()
+            .column_as(active_subscriptions::Column::Expiration.min(), "0")
+            .into_tuple::<Option<JiffTimestampMilliseconds>>()
             .one(db)
             .await?
+            .flatten()
             .map(|j| j.0))
     }
 
@@ -98,6 +99,17 @@ impl ActiveSubscriptions {
             )
             .all(db)
             .await
+    }
+
+    pub async fn get_all_channel_ids(db: &DatabaseConnection) -> Result<HashSet<String>, DbErr> {
+        let stream = active_subscriptions::Entity::find()
+            .select_only()
+            .column(active_subscriptions::Column::ChannelId)
+            .into_tuple::<String>()
+            .all(db)
+            .await?;
+
+        Ok(HashSet::from_iter(stream))
     }
 }
 
@@ -184,5 +196,72 @@ impl SubscriptionQueueItem {
             .await?;
 
         Ok(())
+    }
+}
+
+pub struct KnownChannels;
+
+impl KnownChannels {
+    pub async fn add_channels(
+        db: &DatabaseConnection,
+        channels: impl IntoIterator<Item = known_channels::Model>,
+    ) -> Result<(), DbErr> {
+        known_channels::Entity::insert_many(
+            channels.into_iter().map(IntoActiveModel::into_active_model),
+        )
+        .on_conflict(
+            OnConflict::column(known_channels::Column::ChannelId)
+                .update_columns(known_channels::Column::iter())
+                .to_owned(),
+        )
+        .exec(db)
+        .await?;
+
+        Ok(())
+    }
+}
+
+pub struct OAuth;
+
+#[derive(Debug, Clone)]
+pub struct Authentication {
+    pub access_token: oauth2::AccessToken,
+    pub refresh_token: oauth2::RefreshToken,
+    pub expires_at: Timestamp,
+}
+
+impl OAuth {
+    pub async fn save_token(
+        db: &DatabaseConnection,
+        authentication: Authentication,
+    ) -> Result<(), DbErr> {
+        o_auth::Entity::insert(
+            o_auth::Model {
+                row_id: 0, // Only one
+                access_token: authentication.access_token.into_secret(),
+                refresh_token: authentication.refresh_token.into_secret(),
+                expires_at: JiffTimestampMilliseconds(authentication.expires_at),
+            }
+            .into_active_model(),
+        )
+        .on_conflict(
+            OnConflict::column(o_auth::Column::RowId)
+                .update_columns(o_auth::Column::iter())
+                .to_owned(),
+        )
+        .exec(db)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn get_token(db: &DatabaseConnection) -> Result<Option<Authentication>, DbErr> {
+        o_auth::Entity::find_by_id(0).one(db).await.map(|o| {
+            o.map(|e| Authentication {
+                access_token: oauth2::AccessToken::new(e.access_token),
+                refresh_token: oauth2::RefreshToken::new(e.refresh_token),
+                expires_at: e.expires_at.0,
+            })
+        })
     }
 }

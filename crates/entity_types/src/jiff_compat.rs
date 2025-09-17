@@ -50,7 +50,13 @@ impl TryGetable for JiffTimestampMilliseconds {
     ) -> Result<Self, sea_orm::TryGetError> {
         i64::try_get_by(res, index).and_then(|int| {
             jiff::Timestamp::from_second(int)
-                .map_err(|e| sea_orm::TryGetError::DbErr(sea_orm::DbErr::Type(e.to_string())))
+                .map_err(|e| {
+                    sea_orm::TryGetError::DbErr(sea_orm::DbErr::TryIntoErr {
+                        from: "i64",
+                        into: "jiff::Timestamp",
+                        source: Box::new(e),
+                    })
+                })
                 .map(JiffTimestampMilliseconds)
         })
     }

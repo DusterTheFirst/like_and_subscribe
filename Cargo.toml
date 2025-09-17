@@ -10,7 +10,6 @@ entity_types = { version = "0.1.0", path = "crates/entity_types" }
 
 tokio        = { version = "1.47.0", features = ["full"] }
 sea-orm      = { version = "1.1.14", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-sqlite"] }
-seaography   = { version = "1.1.4", default-features = false }
 serde        = "1.0.219"
 serde_derive = "1.0.219"
 jiff         = { version = "0.2.15", features = ["serde"] }

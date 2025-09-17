@@ -28,14 +28,6 @@ pub enum Relation {
         on_delete = "NoAction"
     )]
     KnownChannels,
-    #[sea_orm(
-        belongs_to = "super::known_videos::Entity",
-        from = "Column::VideoId",
-        to = "super::known_videos::Column::VideoId",
-        on_update = "NoAction",
-        on_delete = "NoAction"
-    )]
-    KnownVideos,
     #[sea_orm(has_one = "super::video_queue_result::Entity")]
     VideoQueueResult,
 }
@@ -43,12 +35,6 @@ pub enum Relation {
 impl Related<super::known_channels::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::KnownChannels.def()
-    }
-}
-
-impl Related<super::known_videos::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::KnownVideos.def()
     }
 }
 

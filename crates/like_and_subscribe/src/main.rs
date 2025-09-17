@@ -1,6 +1,7 @@
-use std::{fs::File, io::BufReader, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use color_eyre::eyre::Context;
+use mail_send::Credentials;
 use migration::{Migrator, MigratorTrait as _};
 use reqwest::redirect::Policy;
 use sea_orm::{Database, DatabaseConnection};
@@ -12,29 +13,30 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberI
 
 use crate::{
     actor::{
-        pubsubhubbub::{pubsub_queue_consumer, pubsub_refresh},
+        email::email_sender,
+        pubsubhubbub::{queue::pubsub_queue_consumer, refresh::pubsub_refresh},
+        subscription::subscription_manager,
         web::web_server,
     },
-    oauth::ApplicationSecretFile,
+    oauth::TokenManager,
 };
 
-mod feed;
-mod oauth;
 //  mod playlist;
-//  mod subscription;
 mod actor;
 mod database;
-
-// TODO: FIXME: better token refreshing (send an email or something)
-// TODO: FIXME: local tailnet vs external tailnet URLs. Basically only pubsub should be external
-// TODO: https://github.com/stalwartlabs/mail-send https://github.com/stalwartlabs/mail-builder
+mod feed;
+mod oauth;
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_file(true)
+                .with_line_number(true),
+        )
         .with(
             tracing_journald::layer()
                 .wrap_err("tracing journald subscriber failed to initialize")?,
@@ -49,23 +51,28 @@ async fn main() -> color_eyre::Result<()> {
     tracing::warn!("a");
     tracing::error!("a");
 
-    let oauth_secret_file = File::open(
-        std::env::var("GOOGLE_CLIENT_SECRET_FILE")
-            .wrap_err("Unable to read GOOGLE_CLIENT_SECRET_FILE env var")?,
-    )
-    .wrap_err("unable to open google client secret file")?;
-    let oauth_secret_file: ApplicationSecretFile =
-        serde_json::from_reader(BufReader::new(oauth_secret_file))
-            .wrap_err("unable to parse google client secret file")?;
-    let oauth_secret = oauth_secret_file.web;
+    let google_client_id = oauth2::ClientId::new(
+        std::env::var("GOOGLE_CLIENT_ID").wrap_err("unable to read GOOGLE_CLIENT_ID env var")?,
+    );
+    let google_client_secret = oauth2::ClientSecret::new(
+        std::env::var("GOOGLE_CLIENT_SECRET")
+            .wrap_err("unable to read GOOGLE_CLIENT_SECRET env var")?,
+    );
+
+    let email_credentials = {
+        Credentials::new(
+            std::env::var("ALERTS_SMTP_USERNAME")
+                .wrap_err("unable to read ALERTS_SMTP_USERNAME env var")?,
+            std::env::var("ALERTS_SMTP_PASSWORD")
+                .wrap_err("unable to read ALERTS_SMTP_PASSWORD env var")?,
+        )
+    };
 
     let playlist_id = std::env::var("YOUTUBE_PLAYLIST_ID")
         .wrap_err("Unable to read YOUTUBE_PLAYLIST_ID env var")?;
 
-    let hostname =
-        std::env::var("PUBSUB_HOSTNAME").wrap_err("Unable to read PUBSUB_HOSTNAME env var")?;
+    let hostname = std::env::var("HOSTNAME").wrap_err("Unable to read HOSTNAME env var")?;
 
-    // TODO: lettre notifications to fastmail w/ sorting to a special folder for problems
     let client = reqwest::ClientBuilder::new()
         .https_only(true)
         .connector_layer(
@@ -85,15 +92,6 @@ async fn main() -> color_eyre::Result<()> {
     // Apply all pending migrations
     Migrator::up(&database, None).await?;
 
-    // TODO: https://docs.rs/google-apis-common/latest/google_apis_common/auth/index.html
-    // TODO: https://developers.google.com/youtube/v3/guides/moving_to_oauth#using-oauth-2.0-for-server-side,-standalone-scripts
-    // TODO: https://developers.google.com/youtube/v3/guides/moving_to_oauth#offline_access
-    // TODO: Provide your own `AuthenticatorDelegate` to adjust the way it operates and get feedback about
-    // what's going on. You probably want to bring in your own `TokenStorage` to persist tokens and
-    // retrieve them from storage.
-
-    // scopes: "https://www.googleapis.com/auth/youtube.readonly",            "https://www.googleapis.com/auth/youtube"
-
     // TODO: some way to verify that the subscriptions are actually subscribed, maybe once a day?
     // https://pubsubhubbub.appspot.com/subscription-details?hub.callback=https%3A%2F%2Flenovo-fedora.taila5e2a.ts.net%2Fpubsub&hub.topic=https%3A%2F%2Fwww.youtube.com%2Fxml%2Ffeeds%2Fvideos.xml%3Fchannel_id%3DUCHtv-7yDeac7OSfPJA_a6aA&hub.secret=
 
@@ -101,6 +99,18 @@ async fn main() -> color_eyre::Result<()> {
 
     let subscriptions_queue_notify = Arc::new(Notify::const_new());
     let video_queue_notify = Arc::new(Notify::const_new());
+
+    let (email_send_tx, email_send_rx) = tokio::sync::mpsc::channel(1);
+
+    let token_manager = TokenManager::init(
+        database.clone(),
+        google_client_id,
+        google_client_secret,
+        hostname.clone(),
+        email_send_tx,
+    )
+    .await
+    .wrap_err("unable to initialize the token manager")?;
 
     let shutdown = CancellationToken::new();
 
@@ -111,6 +121,7 @@ async fn main() -> color_eyre::Result<()> {
         shutdown.clone(),
         database.clone(),
         video_queue_notify.clone(),
+        token_manager.clone(),
     ));
     let mut pubsubhubbub_queue_task = tasks.spawn(pubsub_queue_consumer(
         shutdown.clone(),
@@ -125,8 +136,22 @@ async fn main() -> color_eyre::Result<()> {
         subscriptions_queue_notify.clone(),
     ));
 
+    // Oauth service
+    // let mut oauth_task = tasks.spawn(async {});
+    let mut email_task = tasks.spawn(email_sender(
+        shutdown.clone(),
+        email_credentials,
+        email_send_rx,
+    ));
+
     // Authenticated services
-    // let mut subscription_task = tasks.spawn(async {});
+    let mut subscription_task = tasks.spawn(subscription_manager(
+        shutdown.clone(),
+        database.clone(),
+        subscriptions_queue_notify.clone(),
+        client.clone(),
+        token_manager,
+    ));
     // let mut video_task = tasks.spawn(async {});
 
     // Shutdown signals
@@ -158,7 +183,10 @@ async fn main() -> color_eyre::Result<()> {
         result = &mut pubsubhubbub_queue_task => tracing::error!(?result, "pusubhubbub queue task exited"),
         result = &mut pubsubhubbub_refresh_task => tracing::error!(?result, "pubsubhubbub refresh task exited"),
 
-        // result = &mut subscription_task => tracing::error!(?result, "subscription task exited"),
+        // result = &mut oauth_task => tracing::error!(?result, "oauth task exited"),
+        result = &mut email_task => tracing::error!(?result, "email task exited"),
+
+        result = &mut subscription_task => tracing::error!(?result, "subscription task exited"),
         // result = &mut video_task => tracing::error!(?result, "video task exited"),
 
         _ = shutdown_signal() => tracing::warn!("User requested exit"),

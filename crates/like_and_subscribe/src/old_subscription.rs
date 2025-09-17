@@ -18,7 +18,6 @@ use reqwest::{StatusCode, header};
 use serde::{Deserialize, Serialize};
 use tracing::{Instrument, debug, debug_span, error, info, trace, warn};
 
-
 #[derive(Debug, Default, Serialize, Clone)]
 pub struct YoutubeChannelSubscription {
     pub name: String,
@@ -56,7 +55,8 @@ pub async fn youtube_subscription_manager(
                 .get_token(&[Scope::Readonly.as_ref()])
                 .await
                 .map_err(|e| eyre!("{e}"))
-                .wrap_err("unable to get authentication token").expect("token should be refreshed")
+                .wrap_err("unable to get authentication token")
+                .expect("token should be refreshed")
                 .expect("token should exist"); // TODO: FIXME: remove unwrap
 
             // Mark all existing subscriptions stale
@@ -164,102 +164,8 @@ pub async fn youtube_subscription_manager(
                 total_count,
                 stale_count, subscribed_count, soonest_expiration, "subscription update end"
             );
-        }.instrument(debug_span!("subscription_manage")).await
-    }
-}
-
-async fn get_all_subscriptions(
-    client: &reqwest::Client,
-    subscriptions: &Mutex<HashMap<String, YoutubeChannelSubscription>>,
-    last_etag: &mut Option<String>,
-    token: String,
-) {
-    let mut page_token = None;
-    let url = "https://www.googleapis.com/youtube/v3/subscriptions?part=snippet,contentDetails&mine=true&maxResults=50";
-
-    // Pagination handling
-    loop {
-        let url = if let Some(page_token) = &page_token {
-            format!("{url}&pageToken={page_token}")
-        } else {
-            url.to_string()
-        };
-
-        let headers = if let Some(etag) = last_etag {
-            let mut headers = HeaderMap::new();
-            headers.insert(header::IF_NONE_MATCH, HeaderValue::from_str(etag).unwrap());
-            headers
-        } else {
-            HeaderMap::new()
-        };
-
-        let response = client
-            .get(url)
-            .bearer_auth(&token)
-            .headers(headers)
-            .send()
-            .await
-            .unwrap();
-
-        let status = response.status();
-
-        if status == StatusCode::NOT_MODIFIED {
-            info!("not changed");
-
-            // Mark all existing subscriptions as not stale
-            subscriptions
-                .lock()
-                .unwrap()
-                .values_mut()
-                .for_each(|s| s.stale = false);
-
-            break;
         }
-
-        if !status.is_success() {
-            warn!(status=%status, status_message=status.canonical_reason(), "failed to paginate all subscriptions");
-            break;
-        }
-
-        let json = response.json::<SubscriptionListResponse>().await.unwrap();
-
-        info!(json.etag, json.next_page_token);
-
-        if page_token.is_none() {
-            *last_etag = json.etag;
-        }
-
-        let items = json.items.unwrap();
-
-        let mut subscriptions = subscriptions.lock().unwrap();
-        for subscription in items {
-            let snippet = subscription.snippet.unwrap();
-            let resource = snippet.resource_id.unwrap();
-
-            assert_eq!(resource.kind.as_deref(), Some("youtube#channel"));
-
-            let channel_id = resource.channel_id.unwrap();
-            let channel_name = snippet.title.unwrap();
-
-            // Either add item or mark as fresh
-            match subscriptions.entry(channel_id.clone()) {
-                Entry::Occupied(mut occupied_entry) => {
-                    occupied_entry.get_mut().stale = false;
-                }
-                Entry::Vacant(vacant_entry) => {
-                    vacant_entry.insert(YoutubeChannelSubscription {
-                        name: channel_name,
-                        subscription_expiration: None,
-                        stale: false,
-                    });
-                }
-            }
-        }
-
-        page_token = json.next_page_token;
-
-        if page_token.is_none() {
-            break;
-        }
+        .instrument(debug_span!("subscription_manage"))
+        .await
     }
 }

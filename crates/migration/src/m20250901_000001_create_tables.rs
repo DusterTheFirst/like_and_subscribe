@@ -8,7 +8,6 @@ impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager.create_table(OAuth::create()).await?;
         manager.create_table(KnownChannels::create()).await?;
-        manager.create_table(KnownVideos::create()).await?;
         manager.create_table(ActiveSubscriptions::create()).await?;
         manager.create_table(SubscriptionQueue::create()).await?;
         manager
@@ -26,9 +25,6 @@ impl MigrationTrait for Migration {
             .await?;
         manager
             .drop_table(Table::drop().table(KnownChannels::Table).to_owned())
-            .await?;
-        manager
-            .drop_table(Table::drop().table(KnownVideos::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(ActiveSubscriptions::Table).to_owned())
@@ -98,31 +94,6 @@ impl TableTrait for KnownChannels {
             .col(schema::text(KnownChannels::ChannelId).primary_key())
             .col(schema::text(KnownChannels::ChannelName))
             .col(schema::text(KnownChannels::ChannelProfilePicture))
-            .to_owned()
-    }
-}
-
-#[derive(DeriveIden)]
-enum KnownVideos {
-    Table,
-    VideoId,
-
-    ChannelId,
-}
-
-impl TableTrait for KnownVideos {
-    fn create() -> TableCreateStatement {
-        Table::create()
-            .table(KnownVideos::Table)
-            .if_not_exists()
-            .col(schema::text(KnownVideos::VideoId).primary_key())
-            .col(schema::text(KnownVideos::ChannelId))
-            .foreign_key(
-                ForeignKey::create()
-                    .name("fk-known_videos-channel_id")
-                    .from(KnownVideos::Table, KnownVideos::ChannelId)
-                    .to(KnownChannels::Table, KnownChannels::ChannelId),
-            )
             .to_owned()
     }
 }
@@ -238,12 +209,6 @@ impl TableTrait for VideoQueue {
                     .to(KnownChannels::Table, KnownChannels::ChannelId),
             )
             .col(schema::text(VideoQueue::VideoId))
-            .foreign_key(
-                ForeignKey::create()
-                    .name("fk-video_queue-video_id")
-                    .from(VideoQueue::Table, VideoQueue::VideoId)
-                    .to(KnownVideos::Table, KnownVideos::VideoId),
-            )
             .col(schema::text(VideoQueue::Title))
             .col(schema::big_integer(VideoQueue::PublishedAt))
             .col(schema::big_integer(VideoQueue::UpdatedAt))

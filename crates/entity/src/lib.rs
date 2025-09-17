@@ -6,7 +6,6 @@ pub mod prelude;
 
 pub mod active_subscriptions;
 pub mod known_channels;
-pub mod known_videos;
 pub mod o_auth;
 pub mod subscription_queue;
 pub mod subscription_queue_result;

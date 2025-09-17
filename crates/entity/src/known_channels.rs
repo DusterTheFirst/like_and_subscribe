@@ -17,8 +17,6 @@ pub struct Model {
 pub enum Relation {
     #[sea_orm(has_one = "super::active_subscriptions::Entity")]
     ActiveSubscriptions,
-    #[sea_orm(has_many = "super::known_videos::Entity")]
-    KnownVideos,
     #[sea_orm(has_many = "super::subscription_queue::Entity")]
     SubscriptionQueue,
     #[sea_orm(has_many = "super::video_queue::Entity")]
@@ -28,12 +26,6 @@ pub enum Relation {
 impl Related<super::active_subscriptions::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::ActiveSubscriptions.def()
-    }
-}
-
-impl Related<super::known_videos::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::KnownVideos.def()
     }
 }
 
