@@ -33,12 +33,17 @@ pub async fn email_sender(
                 "me@dusterthefirst.com",
             ));
 
+        // FIXME: do we need to reconnect to the smtp server each time?
         if let Err(error) = smtp.send(email).await {
             tracing::error!(%error, "failed to send email");
         } else {
             tracing::info!("sent alert email");
         }
     }
+
+    _ = smtp.quit().await.inspect_err(
+        |error| tracing::error!(%error, "failed to send quit message to the smtp server"),
+    );
 
     tracing::info!("shutting down");
 
