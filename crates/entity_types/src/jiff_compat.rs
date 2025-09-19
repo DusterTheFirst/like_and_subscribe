@@ -23,7 +23,7 @@ impl Nullable for JiffTimestampMilliseconds {
 impl ValueType for JiffTimestampMilliseconds {
     fn try_from(v: Value) -> Result<Self, ValueTypeErr> {
         match v {
-            Value::BigInt(Some(x)) => jiff::Timestamp::from_second(x)
+            Value::BigInt(Some(x)) => jiff::Timestamp::from_millisecond(x)
                 .map_err(|_e| ValueTypeErr)
                 .map(JiffTimestampMilliseconds),
             _ => Err(ValueTypeErr),
@@ -49,7 +49,7 @@ impl TryGetable for JiffTimestampMilliseconds {
         index: I,
     ) -> Result<Self, sea_orm::TryGetError> {
         i64::try_get_by(res, index).and_then(|int| {
-            jiff::Timestamp::from_second(int)
+            jiff::Timestamp::from_millisecond(int)
                 .map_err(|e| {
                     sea_orm::TryGetError::DbErr(sea_orm::DbErr::TryIntoErr {
                         from: "i64",
