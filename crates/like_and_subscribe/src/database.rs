@@ -255,6 +255,12 @@ impl OAuth {
         Ok(())
     }
 
+    pub async fn remove_token(db: &DatabaseConnection) -> Result<(), DbErr> {
+        o_auth::Entity::delete_by_id(0).exec(db).await?;
+
+        Ok(())
+    }
+
     pub async fn get_token(db: &DatabaseConnection) -> Result<Option<Authentication>, DbErr> {
         o_auth::Entity::find_by_id(0).one(db).await.map(|o| {
             o.map(|e| Authentication {

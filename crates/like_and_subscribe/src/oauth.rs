@@ -86,8 +86,8 @@ impl TokenManager {
 
             match &mut *token {
                 TokenStatus::Existing(authentication) => {
-                    if Timestamp::now().duration_until(authentication.expires_at)
-                        >= SignedDuration::from_secs(60 * 60 * 4)
+                    if Timestamp::now().duration_until(dbg!(authentication.expires_at))
+                        >= SignedDuration::ZERO
                     {
                         return Ok(authentication.access_token.clone());
                     }
@@ -96,6 +96,8 @@ impl TokenManager {
                         .inner
                         .oauth_client
                         .exchange_refresh_token(&authentication.refresh_token)
+                        // Request refresh token
+                        .add_extra_param("access_type", "offline")
                         .request_async(&self.inner.reqwest_client)
                         .await;
 
@@ -113,12 +115,14 @@ impl TokenManager {
                                 }
                                 Err(error) => {
                                     tracing::error!(%error, "failed to handle token response");
+                                    OAuth::remove_token(&self.inner.database).await?;
                                     self.send_email().await;
                                 }
                             }
                         }
                         Err(error) => {
                             tracing::error!(%error, "failed to refresh access token");
+                            OAuth::remove_token(&self.inner.database).await?;
                             self.send_email().await;
                         }
                     }
@@ -139,6 +143,7 @@ impl TokenManager {
         }
     }
 
+    // TODO: explain the reason for the re-auth
     async fn send_email(&self) {
         tracing::info!("Queuing email");
         let (authorize_url, _) = self
@@ -151,7 +156,9 @@ impl TokenManager {
             .add_scope(oauth2::Scope::new(
                 "https://www.googleapis.com/auth/youtube".to_string(),
             ))
-            .add_extra_param("access_type", "offline") // Request refresh token
+            // The following 2 parameters ask for a refresh token
+            .add_extra_param("access_type", "offline")
+            .add_extra_param("prompt", "consent")
             .url();
 
         let message = MessageBuilder::new()
@@ -166,7 +173,6 @@ impl Authentication {
     pub fn from_token_response(
         token_response: StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>,
     ) -> color_eyre::Result<Self> {
-        dbg!(&token_response);
         Ok(Authentication {
             access_token: token_response.access_token().clone(),
             refresh_token: token_response
