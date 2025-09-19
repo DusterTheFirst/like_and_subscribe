@@ -52,6 +52,22 @@ pub async fn subscription_manager(
             Some(channel_ids) => channel_ids,
             None => break, // TODO: this is both on error and on no update
         };
+
+        let updated_channels =
+            current_channels
+                .iter()
+                .map(|(channel_id, metadata)| known_channels::Model {
+                    channel_id: channel_id.clone(),
+                    channel_name: metadata.name.clone(),
+                    channel_profile_picture: metadata.profile_picture.clone(),
+                });
+
+        KnownChannels::add_channels(&database, updated_channels)
+            .await
+            .inspect_err(
+                |error| tracing::error!(%error, "failed to add new channels to known channels list"),
+            )?;
+
         let current_channel_ids = HashSet::from_iter(current_channels.keys().cloned());
 
         let added_channels = current_channel_ids.difference(&previous_channel_ids);
@@ -66,21 +82,6 @@ pub async fn subscription_manager(
             .await
             .inspect_err(
                 |error| tracing::error!(%error, "failed to add actions to subscription queue"),
-            )?;
-
-        let updated_channels =
-            current_channels
-                .into_iter()
-                .map(|(channel_id, metadata)| known_channels::Model {
-                    channel_id: channel_id.clone(),
-                    channel_name: metadata.name,
-                    channel_profile_picture: metadata.profile_picture,
-                });
-
-        KnownChannels::add_channels(&database, updated_channels)
-            .await
-            .inspect_err(
-                |error| tracing::error!(%error, "failed to add new channels to known channels list"),
             )?;
     }
 
