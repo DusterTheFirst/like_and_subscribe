@@ -1,0 +1,150 @@
+body {
+    font-family: Arial, sans-serif;
+    background-color: #f4f7fc;
+    margin: 0;
+
+    position: relative;
+}
+
+main {
+    width: 100%;
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: 20px;
+
+    display: grid;
+    grid-template-columns: auto 1fr;
+    column-gap: 20px;
+}
+
+nav {
+    position: sticky;
+    top: 20px;
+
+    background-color: #fff;
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+    margin-bottom: 40px;
+
+    height: fit-content;
+
+    grid-column: 1;
+}
+
+
+h1 {
+    grid-column: 1 / -1;
+
+
+    text-align: center;
+    margin-bottom: 40px;
+    color: #333;
+}
+
+.section {
+    grid-column: 2;
+
+    background-color: #fff;
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+    margin-bottom: 40px;
+
+    h2,
+    summary:has(h2) {
+        color: #555;
+        margin-bottom: 20px;
+
+        background-color: #fff;
+
+        position: sticky;
+        top: 0px;
+    }
+}
+
+
+/* Style Details */
+details.section summary {
+    cursor: pointer;
+    list-style: none;
+    outline: none;
+
+    &::-webkit-details-marker {
+        display: none;
+    }
+
+    h2::after {
+        content: " ▼";
+        font-size: 1em;
+    }
+}
+
+
+details.section[open] summary h2::after {
+    content: " ▲";
+    font-size: 1em;
+}
+
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    scroll-margin-top: 5em;
+
+    th,
+    td {
+        padding: 10px;
+        text-align: left;
+        border: 1px solid #ddd;
+    }
+
+    th {
+        background-color: #f7f7f7;
+    }
+
+    td {
+        background-color: #f9f9f9;
+        scroll-margin-top: 2em;
+    }
+
+    tr.error td {
+        background-color: hsl(0, 80%, 70%);
+    }
+
+    tr.success td {
+        color: green;
+    }
+
+    tr:has(td:target) td {
+        background-color: gold;
+    }
+}
+
+a {
+    color: #007bff;
+}
+
+a:hover {
+    color: #0056b3;
+}
+
+/*
+.timestamp {
+    color: #777;
+    font-size: 0.85em;
+}
+
+.button {
+    padding: 10px 20px;
+    background-color: #007bff;
+    color: #fff;
+    text-decoration: none;
+    border-radius: 5px;
+    margin-top: 20px;
+    display: inline-block;
+}
+
+.button:hover {
+    background-color: #0056b3;
+} */

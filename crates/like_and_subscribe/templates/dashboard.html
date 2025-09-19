@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Dashboard Overview</title>
+        <style>{{css|safe}}</style>
+    </head>
+    <body>
+        <main>
+            <h1 id="title">System Dashboard</h1>
+
+            <nav>
+                <ul>
+                    <li><a href="#title">Home</a></li>
+                    <li><a href="#table:oauth">OAuth</a></li>
+                    <li><a href="#table:subscriptions">Subscriptions</a></li>
+                    <li><a href="#table:videos">Videos</a></li>
+                    <li><a href="#table:channels">Channels</a></li>
+                </ul>
+            </nav>
+
+            <!-- OAuth Tokens Section -->
+            <div class="section">
+                <h2>OAuth Token</h2>
+                <table id="table:oauth">
+                    <thead>
+                        <tr>
+                            <th>Access Token</th>
+                            <th>Refresh Token</th>
+                            <th>Expires At</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% if let Some(token) = oauth_token %}
+                        <tr>
+                            <td>{{ token.access_token | fmt("{:?}") }}</td>
+                            <td>{{ token.refresh_token | fmt("{:?}") }}</td>
+                            <td>{{ token.expires_at }}</td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Subscription Queue Section -->
+            <details class="section">
+                <summary>
+                    <h2>Subscriptions Queue ({{subscriptions_queue.len()}})</h2>
+                </summary>
+
+                <table id="table:subscriptions">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Channel ID</th>
+                            <th>Action</th>
+                            <th>Queued Timestamp</th>
+
+                            <th>Error</th>
+                            <th>Processed Timestamp</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {%- for (queue_item, result) in subscriptions_queue -%}
+                        {%- let class -%}
+                        {%- if let Some(result) = result.as_ref() -%}
+                        {%- if result.error.is_some() -%}
+                        {%- let class = "error" -%}
+                        {%- else -%}
+                        {%- let class = "success" -%}
+                        {%- endif -%}
+                        {%- else -%}
+                        {%- let class = "" -%}
+                        {%- endif -%}
+                        <tr class="{{ class }}">
+                            <td id="subscription_queue:{{ queue_item.id }}"><a
+                                    href="#subscription_queue:{{queue_item.id}}">{{ queue_item.id }}</a></td>
+                            <td><a href="#channel:{{ queue_item.channel_id }}">{{ queue_item.channel_id }}</a></td>
+                            <td>{{ queue_item.action | fmt("{:?}") }}</td>
+                            <td>{{ queue_item.timestamp.0 }}</td>
+
+                            {% if let Some(result) = result %}
+                            <td>{{ result.error.as_deref().unwrap_or_default() }}</td>
+                            <td>{{ result.timestamp.0 }}</td>
+                            {% else %}
+                            <td></td>
+                            <td></td>
+                            {% endif %}
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </details>
+
+            <!-- Video Queue Section -->
+            <details class="section">
+                <summary>
+                    <h2>Video Queue ({{video_queue.len()}})</h2>
+                </summary>
+                <table id="table:videos">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Channel ID</th>
+                            <th>Video ID</th>
+                            <th>Title</th>
+                            <th>Published At</th>
+                            <th>Updated At</th>
+                            <th>Queued Timestamp</th>
+
+                            <th>Action</th>
+                            <th>Shorts Redirect</th>
+                            <th>Visibility</th>
+                            <th>Duration</th>
+                            <th>Processed Timestamp</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for (video, result) in video_queue %}
+                        <tr>
+                            <td id="video_queue:{{video.id}}"><a href="#video_queue:{{video.id}}">{{ video.id }}</a>
+                            </td>
+                            <a><a href="#channel:{{ video.channel_id }}">{{ video.channel_id }}</a></td>
+                                <td>{{ video.video_id }}</td>
+                                <td>{{ video.title }}</td>
+                                <td>{{ video.published_at.0 }}</td>
+                                <td>{{ video.updated_at.0 }}</td>
+                                <td>{{ video.timestamp.0 }}</td>
+
+                                {% if let Some(result) = result %}
+                                <td>{{ result.action }}</td>
+                                <td>{{ result.shorts_redirect }}</td>
+                                <td>{{ result.visibility | fmt("{:?}") }}</td>
+                                <td>{{ result.duration.0 }}</td>
+                                <td>{{ result.timestamp.0 }}</td>
+                                {% else %}
+                                <td></td>
+                                <td></td>
+                                <td></td>
+                                <td></td>
+                                <td></td>
+                                {% endif %}
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </details>
+
+            <!-- Channel Information Section -->
+            <details class="section">
+                <summary>
+                    <h2>Channel Information ({{known_channels.len()}})</h2>
+                </summary>
+                <table id="table:channels">
+                    <thead>
+                        <tr>
+                            <th>Channel ID</th>
+                            <th>Channel Name</th>
+                            <th>Profile Picture</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for channel in known_channels %}
+                        <tr>
+                            <td id="channel:{{channel.channel_id}}"><a
+                                    href="#channel:{{channel.channel_id}}">{{ channel.channel_id }}</a></td>
+                            <td>{{ channel.channel_name }}</td>
+                            <td><img src="{{ channel.channel_profile_picture }}" alt="Profile Picture" width="50"
+                                    height="50" loading="lazy"></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </details>
+        </main>
+    </body>
+</html>

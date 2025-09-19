@@ -18,6 +18,7 @@ use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
 use crate::oauth::TokenManager;
 
+mod dashboard;
 mod pubsub;
 
 pub async fn web_server(
@@ -36,7 +37,7 @@ pub async fn web_server(
     });
 
     let admin_router = axum::Router::new()
-        .route_with_tsr("/admin/auth", {
+        .route_with_tsr("/auth", {
             #[derive(Deserialize)]
             struct Params {
                 code: oauth2::AuthorizationCode,
@@ -51,6 +52,7 @@ pub async fn web_server(
             )
             .with_state(token_manager)
         })
+        .route_service_with_tsr("/dashboard", method_routing::get(dashboard::dashboard).with_state(database.clone()))
         .layer(tailscale_auth);
 
     let pubsub_router = axum::Router::new().route_with_tsr(
@@ -62,7 +64,7 @@ pub async fn web_server(
     );
 
     let router = axum::Router::new()
-        .merge(admin_router)
+        .nest("/admin", admin_router)
         .merge(pubsub_router)
         .fallback(method_routing::any(|| async {
             axum::http::StatusCode::FORBIDDEN // TODO: IPBAN or other honeypot
