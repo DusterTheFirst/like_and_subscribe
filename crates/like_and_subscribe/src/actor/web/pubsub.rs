@@ -136,6 +136,7 @@ pub async fn pubsub_new_upload(
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
 
+    tracing::trace!("notifying new video queue");
     notification.notify_waiters();
 
     StatusCode::ACCEPTED

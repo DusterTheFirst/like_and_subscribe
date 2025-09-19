@@ -72,6 +72,7 @@ impl TokenManager {
         let authentication = Authentication::from_token_response(token_response)?;
 
         *self.inner.current_token.lock().await = TokenStatus::Existing(authentication.clone());
+        tracing::trace!("notifying wait_for_token waiters");
         self.inner.notify.notify_waiters();
         OAuth::save_token(&self.inner.database, authentication)
             .await
@@ -86,7 +87,7 @@ impl TokenManager {
 
             match &mut *token {
                 TokenStatus::Existing(authentication) => {
-                    if Timestamp::now().duration_until(dbg!(authentication.expires_at))
+                    if Timestamp::now().duration_until(authentication.expires_at)
                         >= SignedDuration::ZERO
                     {
                         return Ok(authentication.access_token.clone());
@@ -140,6 +141,7 @@ impl TokenManager {
             drop(token);
             tracing::debug!("waiting for new token to be obtained");
             self.inner.notify.notified().await;
+            tracing::debug!("token obtained");
         }
     }
 

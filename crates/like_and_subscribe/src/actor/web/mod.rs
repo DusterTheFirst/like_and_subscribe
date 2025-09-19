@@ -65,7 +65,7 @@ pub async fn web_server(
         .merge(admin_router)
         .merge(pubsub_router)
         .fallback(method_routing::any(|| async {
-            axum::http::StatusCode::UNAUTHORIZED // TODO: IPBAN or other honeypot
+            axum::http::StatusCode::FORBIDDEN // TODO: IPBAN or other honeypot
         }))
         .layer(
             ServiceBuilder::new()

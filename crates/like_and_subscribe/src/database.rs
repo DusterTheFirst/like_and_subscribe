@@ -7,7 +7,6 @@ use entity::{
 use entity_types::{
     jiff_compat::JiffTimestampMilliseconds, subscription_queue::SubscriptionAction,
 };
-use futures::{Stream, TryStreamExt};
 use jiff::Timestamp;
 use migration::OnConflict;
 use sea_orm::{
@@ -102,14 +101,14 @@ impl ActiveSubscriptions {
     }
 
     pub async fn get_all_channel_ids(db: &DatabaseConnection) -> Result<HashSet<String>, DbErr> {
-        let stream = active_subscriptions::Entity::find()
+        let all_entities = active_subscriptions::Entity::find()
             .select_only()
             .column(active_subscriptions::Column::ChannelId)
             .into_tuple::<String>()
             .all(db)
             .await?;
 
-        Ok(HashSet::from_iter(stream))
+        Ok(HashSet::from_iter(all_entities))
     }
 }
 
@@ -132,25 +131,28 @@ impl SubscriptionQueue {
         .exec(db)
         .await?;
 
+        tracing::trace!("notifying subscription queue");
         notify.notify_one();
 
         Ok(())
     }
 
-    pub async fn get_pending_actions<'db>(
-        db: &'db DatabaseConnection,
-    ) -> Result<impl Stream<Item = Result<SubscriptionQueueItem, DbErr>> + Send + 'db, DbErr> {
+    pub async fn get_pending_actions(
+        db: &DatabaseConnection,
+    ) -> Result<Vec<SubscriptionQueueItem>, DbErr> {
         Ok(subscription_queue::Entity::find()
             .left_join(subscription_queue_result::Entity)
             .filter(subscription_queue_result::Column::Timestamp.is_null())
             .find_also_linked(SubscriptionQueueToActiveSubscriptions)
-            .stream(db)
+            .all(db) // TODO: paginate?
             .await?
-            .map_ok(|(queue_item, active_subscription)| SubscriptionQueueItem {
+            .into_iter()
+            .map(|(queue_item, active_subscription)| SubscriptionQueueItem {
                 queue_item,
                 active_subscription,
                 db: db.clone(),
-            }))
+            })
+            .collect())
     }
 }
 

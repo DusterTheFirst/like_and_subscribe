@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use entity_types::subscription_queue::SubscriptionAction;
-use futures::TryStreamExt;
+use futures::{StreamExt, stream};
 use reqwest::Client;
 use sea_orm::{DatabaseConnection, DbErr};
 use serde::{Deserialize, Serialize};
@@ -55,9 +55,9 @@ pub async fn pubsub_queue_consumer(
                 |error| tracing::error!(%error, "failed to get pending actions from database"),
             )?;
 
-        actions
-            .try_for_each_concurrent(10, async |queue_item| {
-                queue_item
+        stream::iter(actions)
+            .for_each_concurrent(10, async |queue_item| {
+                let result = queue_item
                     .process::<_, reqwest::Error>(async |queue_item, active_subscription| {
                         let topic = topic(&queue_item.channel_id);
 
@@ -90,15 +90,16 @@ pub async fn pubsub_queue_consumer(
 
                         Ok(())
                     })
-                    .await
+                    .await;
+
+                if let Err(error) = result {
+                    tracing::error!(%error, "failed to save processed results")
+                }
             })
-            .await
-            .inspect_err(
-                |error| tracing::error!(%error, "failed to get pending action from database"),
-            )?;
+            .await;
 
         tokio::select! {
-            _ = notify.notified() => {},
+            _ = notify.notified() => tracing::trace!("pubsub notification received"),
             _ = shutdown.cancelled() => break,
         }
     }

@@ -1,5 +1,5 @@
 /target
 client_secret_*.json
 tokens.json
-*.sqlite
+*.sqlite*
 *.envrc
