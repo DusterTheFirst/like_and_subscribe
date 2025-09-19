@@ -4,7 +4,7 @@ use color_eyre::eyre::Context;
 use mail_send::Credentials;
 use migration::{Migrator, MigratorTrait as _};
 use reqwest::redirect::Policy;
-use sea_orm::{Database, DatabaseConnection};
+use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use tokio::{signal::unix::SignalKind, sync::Notify};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tower::ServiceBuilder;
@@ -85,9 +85,11 @@ async fn main() -> color_eyre::Result<()> {
         .build()
         .wrap_err("Unable to setup reqwest client")?;
 
-    let database: DatabaseConnection = Database::connect("sqlite://database.sqlite?mode=rwc")
-        .await
-        .wrap_err("unable to open database file")?;
+    let database: DatabaseConnection = Database::connect(ConnectOptions::new(
+        std::env::var("DATABASE_URL").wrap_err("DATABASE_URL not set")?,
+    ))
+    .await
+    .wrap_err("unable to open database file")?;
 
     // Apply all pending migrations
     Migrator::up(&database, None).await?;
