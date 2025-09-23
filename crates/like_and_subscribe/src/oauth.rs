@@ -9,10 +9,16 @@ use oauth2::{
     StandardTokenResponse, TokenResponse, TokenUrl,
     basic::{BasicClient, BasicTokenType},
 };
-use sea_orm::{DatabaseConnection, DbErr};
 use tokio::sync::{Mutex, Notify, mpsc};
 
-use crate::database::{Authentication, OAuth};
+use crate::database::Database;
+
+#[derive(Debug, Clone)]
+pub struct Authentication {
+    pub access_token: oauth2::AccessToken,
+    pub refresh_token: oauth2::RefreshToken,
+    pub expires_at: Timestamp,
+}
 
 #[derive(Clone)]
 pub struct TokenManager {
@@ -20,12 +26,12 @@ pub struct TokenManager {
 }
 impl TokenManager {
     pub async fn init(
-        database: DatabaseConnection,
+        database: Database,
         client_id: ClientId,
         client_secret: ClientSecret,
         hostname: String,
         mail_send: mpsc::Sender<MessageBuilder<'static>>,
-    ) -> Result<Self, DbErr> {
+    ) -> Result<Self, redb::Error> {
         let oauth_client = BasicClient::new(client_id)
             .set_client_secret(client_secret)
             .set_auth_uri(
@@ -50,7 +56,7 @@ impl TokenManager {
                 oauth_client,
                 reqwest_client,
                 mail_send,
-                current_token: Mutex::new(match OAuth::get_token(&database).await? {
+                current_token: Mutex::new(match database.oauth().get().await? {
                     Some(t) => TokenStatus::Existing(t),
                     None => TokenStatus::Missing { alerted: false },
                 }),
@@ -74,14 +80,17 @@ impl TokenManager {
         *self.inner.current_token.lock().await = TokenStatus::Existing(authentication.clone());
         tracing::trace!("notifying wait_for_token waiters");
         self.inner.notify.notify_waiters();
-        OAuth::save_token(&self.inner.database, authentication)
+        self.inner
+            .database
+            .oauth()
+            .set(authentication)
             .await
             .wrap_err("unable to save new access token into the database")?;
 
         Ok(())
     }
 
-    pub async fn wait_for_token(&self) -> Result<AccessToken, DbErr> {
+    pub async fn wait_for_token(&self) -> Result<AccessToken, redb::Error> {
         loop {
             let mut token = self.inner.current_token.lock().await;
 
@@ -110,20 +119,20 @@ impl TokenManager {
                             match authentication {
                                 Ok(authentication) => {
                                     let access_token = authentication.access_token.clone();
-                                    OAuth::save_token(&self.inner.database, authentication).await?;
+                                    self.inner.database.oauth().set(authentication).await?;
 
                                     return Ok(access_token);
                                 }
                                 Err(error) => {
                                     tracing::error!(%error, "failed to handle token response");
-                                    OAuth::remove_token(&self.inner.database).await?;
+                                    self.inner.database.oauth().delete().await?;
                                     self.send_email().await;
                                 }
                             }
                         }
                         Err(error) => {
                             tracing::error!(%error, "failed to refresh access token");
-                            OAuth::remove_token(&self.inner.database).await?;
+                            self.inner.database.oauth().delete().await?;
                             self.send_email().await;
                         }
                     }
@@ -195,7 +204,7 @@ struct TokenManagerInner {
     mail_send: mpsc::Sender<MessageBuilder<'static>>,
 
     reqwest_client: reqwest::Client,
-    database: DatabaseConnection,
+    database: Database,
 
     current_token: Mutex<TokenStatus>,
     notify: Notify,

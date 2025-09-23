@@ -8,17 +8,10 @@ axum               = "0.8.4"
 axum-extra         = { version = "0.10.1", features = ["error-response", "typed-header"] }
 bstr               = "1.12.0"
 color-eyre         = { workspace = true }
-entity             = { workspace = true }
 futures            = "0.3.31"
 google-youtube3    = { version = "6.0.0", default-features = false }
 jiff               = { workspace = true }
-entity_types       = { workspace = true }
-migration          = { workspace = true }
-mime               = "0.3.17"
-monostate          = "0.1.14"
-quick-xml          = { version = "0.38.0", features = ["serialize"] }
 reqwest            = { version = "0.12.22", default-features = false, features = ["brotli", "charset", "deflate", "gzip", "http2", "json", "rustls-tls-native-roots", "system-proxy", "zstd"] }
-sea-orm            = { workspace = true }
 serde              = { workspace = true }
 serde_derive       = { workspace = true }
 serde_json         = "1.0.141"
@@ -32,4 +25,4 @@ tracing-journald   = "0.3.1"
 tracing-subscriber = { workspace = true }
 oauth2             = "5.0.0"
 mail-send          = { version = "0.5.2", default-features = false, features = ["builder"] }
-askama             = "0.14.0"
+redb               = "3.0.2"

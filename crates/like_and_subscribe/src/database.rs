@@ -1,275 +1,112 @@
-use std::{collections::HashSet, error::Error};
+use std::{path::PathBuf, sync::Arc};
 
-use entity::{
-    SubscriptionQueueToActiveSubscriptions, active_subscriptions, known_channels, o_auth,
-    subscription_queue, subscription_queue_result, video_queue,
-};
-use entity_types::{
-    jiff_compat::JiffTimestampMilliseconds, subscription_queue::SubscriptionAction,
-};
 use jiff::Timestamp;
-use migration::OnConflict;
-use sea_orm::{
-    ActiveValue, ColumnTrait as _, DatabaseConnection, DbErr, EntityTrait as _, IntoActiveModel,
-    Iterable, QueryFilter, QuerySelect,
-};
-use tokio::sync::Notify;
+use oauth2::{AccessToken, RefreshToken};
+use redb::{ReadableDatabase as _, TableDefinition};
 
-use crate::feed;
+use crate::oauth::Authentication;
 
-pub struct VideoQueue;
-
-impl VideoQueue {
-    pub async fn new_video(db: &DatabaseConnection, entry: feed::Entry) -> Result<(), DbErr> {
-        video_queue::Entity::insert(video_queue::ActiveModel {
-            id: ActiveValue::NotSet,
-            channel_id: ActiveValue::Set(entry.channel_id),
-            video_id: ActiveValue::Set(entry.video_id),
-
-            title: ActiveValue::Set(entry.title),
-
-            published_at: ActiveValue::Set(JiffTimestampMilliseconds(entry.published)),
-            updated_at: ActiveValue::Set(JiffTimestampMilliseconds(entry.updated)),
-
-            timestamp: ActiveValue::Set(JiffTimestampMilliseconds(Timestamp::now())),
-        })
-        .exec(db)
-        .await?;
-
-        Ok(())
-    }
+#[derive(Clone)]
+pub struct Database {
+    connection: Arc<redb::Database>,
 }
 
-pub struct ActiveSubscriptions;
+impl Database {
+    pub async fn create(database_path: PathBuf) -> Result<Self, redb::Error> {
+        Ok(Self {
+            connection: Arc::new(
+                tokio::task::spawn_blocking(|| {
+                    let db = redb::Database::create(database_path)?;
 
-impl ActiveSubscriptions {
-    pub async fn remove_subscription(db: &DatabaseConnection, id: String) -> Result<(), DbErr> {
-        active_subscriptions::Entity::delete_by_id(id)
-            .exec(db)
-            .await?;
+                    let txn = db.begin_write()?;
+                    txn.open_table(OAuth::TABLE)?;
+                    txn.commit()?;
 
-        Ok(())
-    }
-
-    pub async fn add_subscription(
-        db: &DatabaseConnection,
-        channel_id: String,
-        expiration: Timestamp,
-    ) -> Result<(), DbErr> {
-        active_subscriptions::Entity::insert(
-            active_subscriptions::Model {
-                channel_id: channel_id.to_owned(),
-                expiration: JiffTimestampMilliseconds(expiration),
-            }
-            .into_active_model(),
-        )
-        .on_conflict(
-            OnConflict::column(active_subscriptions::Column::ChannelId)
-                .update_columns(active_subscriptions::Column::iter())
-                .to_owned(),
-        )
-        .exec(db)
-        .await?;
-
-        Ok(())
-    }
-
-    pub async fn get_soonest_expiration(
-        db: &DatabaseConnection,
-    ) -> Result<Option<Timestamp>, DbErr> {
-        Ok(active_subscriptions::Entity::find()
-            .select_only()
-            .column_as(active_subscriptions::Column::Expiration.min(), "0")
-            .into_tuple::<Option<JiffTimestampMilliseconds>>()
-            .one(db)
-            .await?
-            .flatten()
-            .map(|j| j.0))
-    }
-
-    pub async fn get_expiring(
-        db: &DatabaseConnection,
-        expires_before: Timestamp,
-    ) -> Result<Vec<active_subscriptions::Model>, DbErr> {
-        active_subscriptions::Entity::find()
-            .filter(
-                active_subscriptions::Column::Expiration
-                    .lt(JiffTimestampMilliseconds(expires_before)),
-            )
-            .all(db)
-            .await
-    }
-
-    pub async fn get_all_channel_ids(db: &DatabaseConnection) -> Result<HashSet<String>, DbErr> {
-        let all_entities = active_subscriptions::Entity::find()
-            .select_only()
-            .column(active_subscriptions::Column::ChannelId)
-            .into_tuple::<String>()
-            .all(db)
-            .await?;
-
-        Ok(HashSet::from_iter(all_entities))
-    }
-}
-
-pub struct SubscriptionQueue;
-
-impl SubscriptionQueue {
-    pub async fn add_actions(
-        db: &DatabaseConnection,
-        notify: &Notify,
-        actions: impl IntoIterator<Item = (String, SubscriptionAction)>, // TODO: newtype channel id and other ids
-    ) -> Result<(), DbErr> {
-        subscription_queue::Entity::insert_many(actions.into_iter().map(|(channel_id, action)| {
-            subscription_queue::ActiveModel {
-                id: ActiveValue::NotSet,
-                channel_id: ActiveValue::Set(channel_id),
-                action: ActiveValue::Set(action),
-                timestamp: ActiveValue::Set(JiffTimestampMilliseconds(Timestamp::now())),
-            }
-        }))
-        .exec(db)
-        .await?;
-
-        tracing::trace!("notifying subscription queue");
-        notify.notify_one();
-
-        Ok(())
-    }
-
-    pub async fn get_pending_actions(
-        db: &DatabaseConnection,
-    ) -> Result<Vec<SubscriptionQueueItem>, DbErr> {
-        Ok(subscription_queue::Entity::find()
-            .left_join(subscription_queue_result::Entity)
-            .filter(subscription_queue_result::Column::Timestamp.is_null())
-            .find_also_linked(SubscriptionQueueToActiveSubscriptions)
-            .all(db) // TODO: paginate?
-            .await?
-            .into_iter()
-            .map(|(queue_item, active_subscription)| SubscriptionQueueItem {
-                queue_item,
-                active_subscription,
-                db: db.clone(),
-            })
-            .collect())
-    }
-}
-
-pub struct SubscriptionQueueItem {
-    queue_item: subscription_queue::Model,
-    active_subscription: Option<active_subscriptions::Model>,
-    db: DatabaseConnection,
-}
-
-impl SubscriptionQueueItem {
-    pub async fn process<F, E>(self, function: F) -> Result<(), DbErr>
-    where
-        F: AsyncFnOnce(
-                &subscription_queue::Model,
-                Option<&active_subscriptions::Model>,
-            ) -> Result<(), E>
-            + Send
-            + Sync,
-        E: Error + Send + Sync,
-    {
-        let result = function(&self.queue_item, self.active_subscription.as_ref()).await;
-
-        let model = match result {
-            Ok(()) => subscription_queue_result::Model {
-                queue_id: self.queue_item.id,
-                error: None,
-                timestamp: JiffTimestampMilliseconds(Timestamp::now()),
-            },
-            Err(error) => {
-                // TODO: how to handle retries? do we just wait for the subscription manager?
-                tracing::error!(%error, "failed to process subscription queue item");
-
-                subscription_queue_result::Model {
-                    queue_id: self.queue_item.id,
-                    error: Some(error.to_string()),
-                    timestamp: JiffTimestampMilliseconds(Timestamp::now()),
-                }
-            }
-        };
-
-        subscription_queue_result::Entity::insert(model.into_active_model())
-            .exec(&self.db)
-            .await?;
-
-        Ok(())
-    }
-}
-
-pub struct KnownChannels;
-
-impl KnownChannels {
-    pub async fn add_channels(
-        db: &DatabaseConnection,
-        channels: impl IntoIterator<Item = known_channels::Model>,
-    ) -> Result<(), DbErr> {
-        known_channels::Entity::insert_many(
-            channels.into_iter().map(IntoActiveModel::into_active_model),
-        )
-        .on_conflict(
-            OnConflict::column(known_channels::Column::ChannelId)
-                .update_columns(known_channels::Column::iter())
-                .to_owned(),
-        )
-        .exec(db)
-        .await?;
-
-        Ok(())
-    }
-}
-
-pub struct OAuth;
-
-#[derive(Debug, Clone)]
-pub struct Authentication {
-    pub access_token: oauth2::AccessToken,
-    pub refresh_token: oauth2::RefreshToken,
-    pub expires_at: Timestamp,
-}
-
-impl OAuth {
-    pub async fn save_token(
-        db: &DatabaseConnection,
-        authentication: Authentication,
-    ) -> Result<(), DbErr> {
-        o_auth::Entity::insert(
-            o_auth::Model {
-                row_id: 0, // Only one
-                access_token: authentication.access_token.into_secret(),
-                refresh_token: authentication.refresh_token.into_secret(),
-                expires_at: JiffTimestampMilliseconds(authentication.expires_at),
-            }
-            .into_active_model(),
-        )
-        .on_conflict(
-            OnConflict::column(o_auth::Column::RowId)
-                .update_columns(o_auth::Column::iter())
-                .to_owned(),
-        )
-        .exec(db)
-        .await?;
-
-        Ok(())
-    }
-
-    pub async fn remove_token(db: &DatabaseConnection) -> Result<(), DbErr> {
-        o_auth::Entity::delete_by_id(0).exec(db).await?;
-
-        Ok(())
-    }
-
-    pub async fn get_token(db: &DatabaseConnection) -> Result<Option<Authentication>, DbErr> {
-        o_auth::Entity::find_by_id(0).one(db).await.map(|o| {
-            o.map(|e| Authentication {
-                access_token: oauth2::AccessToken::new(e.access_token),
-                refresh_token: oauth2::RefreshToken::new(e.refresh_token),
-                expires_at: e.expires_at.0,
-            })
+                    Ok::<_, redb::Error>(db)
+                })
+                .await
+                .unwrap()?,
+            ),
         })
     }
+
+    pub fn oauth(&self) -> OAuth<'_> {
+        OAuth { database: self }
+    }
 }
+
+type OAuthStorage<'s> = (&'s str, &'s str, i64);
+pub struct OAuth<'a> {
+    database: &'a Database,
+}
+impl<'a> OAuth<'a> {
+    const TABLE: TableDefinition<'static, (), OAuthStorage<'static>> =
+        TableDefinition::new("oauth");
+
+    pub async fn set(&self, auth: Authentication) -> Result<(), redb::Error> {
+        let database = self.database.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let write_txn = database.connection.begin_write()?;
+            {
+                let mut table = write_txn.open_table(Self::TABLE)?;
+                table.insert(
+                    (),
+                    &(
+                        auth.access_token.secret().as_str(),
+                        auth.refresh_token.secret().as_str(),
+                        auth.expires_at.as_millisecond(),
+                    ),
+                )?;
+            }
+            write_txn.commit()?;
+
+            Ok(())
+        })
+        .await
+        .unwrap()
+    }
+
+    pub async fn delete(&self) -> Result<(), redb::Error> {
+        let database = self.database.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let write_txn = database.connection.begin_write()?;
+            {
+                let mut table = write_txn.open_table(Self::TABLE)?;
+                table.remove(())?;
+            }
+            write_txn.commit()?;
+
+            Ok(())
+        })
+        .await
+        .unwrap()
+    }
+
+    pub async fn get(&self) -> Result<Option<Authentication>, redb::Error> {
+        let database = self.database.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let read_txn = database.connection.begin_read()?;
+            let table = read_txn.open_table(Self::TABLE)?;
+
+            if let Some(value) = table.get(())? {
+                let (access_token, refresh_token, expires_at) = value.value();
+
+                Ok(Some(Authentication {
+                    access_token: AccessToken::new(access_token.to_owned()),
+                    refresh_token: RefreshToken::new(refresh_token.to_owned()),
+                    expires_at: Timestamp::from_millisecond(expires_at)
+                        .expect("timestamp should always be within the valid range"),
+                }))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
+        .unwrap()
+    }
+}
+
+const UPDATE_TABLE: TableDefinition<u64, u64> = TableDefinition::new("updates");

@@ -1,37 +1,31 @@
 use std::{
-    borrow::Cow,
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
+    borrow::Cow, collections::{HashMap, HashSet}, sync::Arc, time::Duration
 };
 
 use axum::http::{HeaderMap, HeaderValue};
-use entity::known_channels;
-use entity_types::subscription_queue::SubscriptionAction;
-use google_youtube3::api::SubscriptionListResponse;
+use futures::{StreamExt, stream};
+use google_youtube3::api::{ChannelListResponse, SubscriptionListResponse};
 use oauth2::AccessToken;
 use reqwest::{StatusCode, header};
-use sea_orm::{DatabaseConnection, DbErr};
-use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    database::{ActiveSubscriptions, KnownChannels, SubscriptionQueue},
-    oauth::TokenManager,
-};
+use crate::{database::Database, oauth::TokenManager};
 
 pub async fn subscription_manager(
     shutdown: CancellationToken,
-    database: DatabaseConnection,
-    notify: Arc<Notify>,
+    database: Database,
     client: reqwest::Client,
     token_manager: TokenManager,
-) -> Result<(), DbErr> {
+    playlist_id: Arc<str>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     // One hour
     let mut update_interval = tokio::time::interval(Duration::from_secs(60 * 60));
     update_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut last_etag: Option<String> = None;
+
+    let mut subscribed_channels: HashMap<String, ChannelMetadata> = HashMap::new();
+    let mut subscribed_channels_playlist: HashMap<String, String> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -39,50 +33,80 @@ pub async fn subscription_manager(
             _ = update_interval.tick() => {},
         }
 
-        let previous_channel_ids = ActiveSubscriptions::get_all_channel_ids(&database)
-            .await
-            .inspect_err(|error| tracing::error!(%error, "failed to get all channel ids"))?;
-
         let token = tokio::select! {
             _ = shutdown.cancelled() => break,
             token_result = token_manager.wait_for_token() => token_result.inspect_err(|error| tracing::error!(%error, "failed to get current token"))?,
         };
 
-        let current_channels = match get_all_subscriptions(&client, &mut last_etag, token).await {
-            Some(channel_ids) => channel_ids,
-            None => break, // TODO: this is both on error and on no update
+        match get_all_subscriptions(&client, &mut last_etag, &token).await {
+            Ok(Some(subscriptions)) => subscribed_channels = subscriptions,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "failed to paginate all subscriptions");
+                continue;
+            }
         };
 
-        let updated_channels =
-            current_channels
-                .iter()
-                .map(|(channel_id, metadata)| known_channels::Model {
-                    channel_id: channel_id.clone(),
-                    channel_name: metadata.name.clone(),
-                    channel_profile_picture: metadata.profile_picture.clone(),
-                });
+        let subscribed_channel_ids: HashSet<&str> =
+            subscribed_channels.keys().map(String::as_str).collect();
+        let subscribed_channels_playlist_ids: HashSet<&str> = subscribed_channels_playlist
+            .keys()
+            .map(String::as_str)
+            .collect();
 
-        KnownChannels::add_channels(&database, updated_channels)
-            .await
-            .inspect_err(
-                |error| tracing::error!(%error, "failed to add new channels to known channels list"),
-            )?;
+        let channels_requiring_playlist_info: Vec<String> = subscribed_channel_ids
+            .difference(&subscribed_channels_playlist_ids)
+            .copied()
+            .map(String::from)
+            .collect();
 
-        let current_channel_ids = HashSet::from_iter(current_channels.keys().cloned());
+        for channel_ids in channels_requiring_playlist_info.chunks(50) {
+            let url = format!(
+                "https://www.googleapis.com/youtube/v3/channels?part=contentDetails,id&maxResults=50&id={}",
+                channel_ids.join(",")
+            );
 
-        let added_channels = current_channel_ids.difference(&previous_channel_ids);
-        let removed_channels = previous_channel_ids.difference(&current_channel_ids);
+            let response = client
+                .get(url)
+                .bearer_auth(token.secret())
+                .send()
+                .await?
+                .error_for_status()?;
 
-        let added_actions =
-            added_channels.map(|channel_id| (channel_id.clone(), SubscriptionAction::Subscribe));
-        let removed_actions = removed_channels
-            .map(|channel_id| (channel_id.clone(), SubscriptionAction::Unsubscribe));
+            let json = response.json::<ChannelListResponse>().await?;
 
-        SubscriptionQueue::add_actions(&database, &notify, added_actions.chain(removed_actions))
-            .await
-            .inspect_err(
-                |error| tracing::error!(%error, "failed to add actions to subscription queue"),
-            )?;
+            for item in json.items.unwrap() {
+                subscribed_channels_playlist.insert(
+                    item.id.unwrap(),
+                    item.content_details
+                        .unwrap()
+                        .related_playlists
+                        .unwrap()
+                        .uploads
+                        .unwrap(),
+                );
+            }
+        }
+
+        dbg!(subscribed_channels_playlist);
+
+        panic!();
+
+        // stream::iter(&subscribed_channels)
+        //     .for_each_concurrent(5, async |(channel_id, channel_info)| {
+        //         let playlist_url = subscribed_channels_playlist.get(channel_id).unwrap(); // must be set previously
+
+        //         let url = "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails&maxResults=5&playlistId={}";
+
+        //         let response = client
+        //         .get(url)
+        //         .bearer_auth(token.secret())
+        //         .send()
+        //         .await?
+        //         .error_for_status()?;
+
+        //     })
+        //     .await;
     }
 
     tracing::info!("shutting down");
@@ -97,13 +121,13 @@ struct ChannelMetadata {
 
 async fn get_all_subscriptions(
     client: &reqwest::Client,
-    last_etag: &mut Option<String>,
-    token: AccessToken,
-) -> Option<HashMap<String, ChannelMetadata>> {
-    let mut page_token = None;
+    etag: &mut Option<String>,
+    token: &AccessToken,
+) -> Result<Option<HashMap<String, ChannelMetadata>>, reqwest::Error> {
     let url = "https://www.googleapis.com/youtube/v3/subscriptions?part=snippet,contentDetails&mine=true&maxResults=50";
 
     let mut channel_ids = HashMap::new();
+    let mut page_token = None;
 
     // Pagination handling
     loop {
@@ -113,40 +137,36 @@ async fn get_all_subscriptions(
             Cow::Borrowed(url)
         };
 
-        let headers = if let Some(etag) = last_etag {
+        let headers = if page_token.is_none()
+            && let Some(etag) = etag
+        {
             HeaderMap::from_iter([(header::IF_NONE_MATCH, HeaderValue::from_str(etag).unwrap())])
         } else {
             HeaderMap::new()
         };
 
+        // TODO: log errors in database?
         let response = client
             .get(url.as_ref())
             .bearer_auth(token.secret())
             .headers(headers)
             .send()
-            .await
-            .unwrap();
+            .await?
+            .error_for_status()?;
 
-        let status = response.status();
-
-        if status == StatusCode::NOT_MODIFIED {
-            // TODO: in database?
+        if response.status() == StatusCode::NOT_MODIFIED {
             tracing::info!("not changed");
-            break None;
+            break Ok(None);
         }
 
-        if !status.is_success() {
-            // TODO: in database?
-            tracing::warn!(status=%status, status_message=status.canonical_reason(), "failed to paginate all subscriptions");
-            break None;
-        }
-
-        let json = response.json::<SubscriptionListResponse>().await.unwrap();
+        let json = response.json::<SubscriptionListResponse>().await?;
 
         if page_token.is_none() {
             // Update first etag
-            *last_etag = json.etag;
+            *etag = Some(json.etag.unwrap());
         }
+
+        // TODO: FIXME: so many unwrap.. Somehow better error handling
 
         // let total_results = json.page_info.unwrap().total_results.unwrap();
         let items = json.items.unwrap();
@@ -183,7 +203,7 @@ async fn get_all_subscriptions(
         page_token = json.next_page_token;
 
         if page_token.is_none() {
-            break Some(channel_ids);
+            break Ok(Some(channel_ids));
         }
     }
 }
