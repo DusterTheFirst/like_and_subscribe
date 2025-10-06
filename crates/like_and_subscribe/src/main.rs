@@ -1,6 +1,7 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
 use color_eyre::eyre::{Context, eyre};
+use jiff::Timestamp;
 use mail_send::Credentials;
 use reqwest::redirect::Policy;
 use tokio::signal::unix::SignalKind;
@@ -10,7 +11,7 @@ use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 use crate::{
-    actor::{email::email_sender, subscription::subscription_manager, web::web_server},
+    actor::{email::email_sender, playlist::playlist_updater, web::web_server},
     database::Database,
     oauth::TokenManager,
 };
@@ -66,6 +67,10 @@ async fn main() -> color_eyre::Result<()> {
 
     let hostname = std::env::var("HOSTNAME").wrap_err("Unable to read HOSTNAME env var")?;
 
+    let earliest_update = Timestamp::from_str(
+        &std::env::var("EARLIEST_UPDATE").wrap_err("Unable to read EARLIEST_UPDATE env var")?,
+    )?;
+
     let client = reqwest::ClientBuilder::new()
         .https_only(true)
         .connector_layer(
@@ -80,9 +85,12 @@ async fn main() -> color_eyre::Result<()> {
 
     let (email_send_tx, email_send_rx) = tokio::sync::mpsc::channel(1);
 
-    let database = Database::create(PathBuf::from(
-        std::env::var_os("DATABASE_URL").ok_or_else(|| eyre!("DATABASE_URL not set"))?,
-    ))
+    let database = Database::create(
+        PathBuf::from(
+            std::env::var_os("DATABASE_URL").ok_or_else(|| eyre!("DATABASE_URL not set"))?,
+        ),
+        earliest_update,
+    )
     .await
     .wrap_err("unable to open database file")?;
 
@@ -111,7 +119,7 @@ async fn main() -> color_eyre::Result<()> {
     ));
 
     // Authenticated services
-    let mut subscription_task = tasks.spawn(subscription_manager(
+    let mut subscription_task = tasks.spawn(playlist_updater(
         shutdown.clone(),
         database.clone(),
         client.clone(),

@@ -9,10 +9,14 @@ use crate::oauth::Authentication;
 #[derive(Clone)]
 pub struct Database {
     connection: Arc<redb::Database>,
+    earliest_update: Timestamp,
 }
 
 impl Database {
-    pub async fn create(database_path: PathBuf) -> Result<Self, redb::Error> {
+    pub async fn create(
+        database_path: PathBuf,
+        earliest_update: Timestamp,
+    ) -> Result<Self, redb::Error> {
         Ok(Self {
             connection: Arc::new(
                 tokio::task::spawn_blocking(|| {
@@ -20,6 +24,7 @@ impl Database {
 
                     let txn = db.begin_write()?;
                     txn.open_table(OAuth::TABLE)?;
+                    txn.open_table(UpdateDate::TABLE)?;
                     txn.commit()?;
 
                     Ok::<_, redb::Error>(db)
@@ -27,11 +32,16 @@ impl Database {
                 .await
                 .unwrap()?,
             ),
+            earliest_update,
         })
     }
 
     pub fn oauth(&self) -> OAuth<'_> {
         OAuth { database: self }
+    }
+
+    pub fn update_date(&self) -> UpdateDate<'_> {
+        UpdateDate { database: self }
     }
 }
 
@@ -109,4 +119,44 @@ impl<'a> OAuth<'a> {
     }
 }
 
-const UPDATE_TABLE: TableDefinition<u64, u64> = TableDefinition::new("updates");
+pub struct UpdateDate<'a> {
+    database: &'a Database,
+}
+impl<'a> UpdateDate<'a> {
+    const TABLE: TableDefinition<'static, String, i64> = TableDefinition::new("last_seen_video");
+
+    pub async fn set(&self, channel_id: String, timestamp: Timestamp) -> Result<(), redb::Error> {
+        let database = self.database.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let write_txn = database.connection.begin_write()?;
+            {
+                let mut table = write_txn.open_table(Self::TABLE)?;
+                table.insert(channel_id, timestamp.as_millisecond())?;
+            }
+            write_txn.commit()?;
+
+            Ok(())
+        })
+        .await
+        .unwrap()
+    }
+
+    pub async fn get(&self, channel_id: String) -> Result<Timestamp, redb::Error> {
+        let database = self.database.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let read_txn = database.connection.begin_read()?;
+            let table = read_txn.open_table(Self::TABLE)?;
+
+            if let Some(value) = table.get(channel_id)? {
+                Ok(Timestamp::from_millisecond(value.value())
+                    .expect("stored timestamp should be valid"))
+            } else {
+                Ok(database.earliest_update)
+            }
+        })
+        .await
+        .unwrap()
+    }
+}

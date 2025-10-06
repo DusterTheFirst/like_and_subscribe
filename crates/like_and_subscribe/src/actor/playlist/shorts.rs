@@ -9,7 +9,7 @@ mod test {
     use reqwest::redirect::Policy;
     use tower::ServiceBuilder;
 
-    use crate::playlist::shorts::check_redirect;
+    use super::check_redirect;
 
     const VIDEO_IDS: &[(&str, bool)] = &[
         ("egMU3JBQZO8", true),

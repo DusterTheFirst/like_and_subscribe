@@ -1,3 +1,3 @@
 pub mod email;
-pub mod subscription;
+pub mod playlist;
 pub mod web;
