@@ -1,15 +1,8 @@
-use std::{
-    borrow::Cow,
-    collections::{HashMap, HashSet},
-    error::Error,
-    sync::Arc,
-    time::Duration,
-};
+use std::{borrow::Cow, collections::HashMap, error::Error, sync::Arc, time::Duration};
 
 use axum::http::{HeaderMap, HeaderValue};
-use futures::{StreamExt, stream};
 use google_youtube3::api::{
-    ChannelListResponse, PlaylistItem, PlaylistItemListResponse, PlaylistItemSnippet, ResourceId,
+    PlaylistItem, PlaylistItemListResponse, PlaylistItemSnippet, ResourceId,
     SubscriptionListResponse,
 };
 use jiff::Timestamp;
