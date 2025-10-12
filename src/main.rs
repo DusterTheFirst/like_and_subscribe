@@ -1,8 +1,10 @@
-use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use std::{ffi::OsString, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
-use color_eyre::eyre::{Context, eyre};
+use color_eyre::eyre::Context;
+use envconfig::Envconfig;
 use jiff::Timestamp;
 use mail_send::Credentials;
+use opentelemetry::{KeyValue, global};
 use reqwest::redirect::Policy;
 use tokio::signal::unix::SignalKind;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -21,9 +23,54 @@ mod actor;
 mod database;
 mod oauth;
 
+#[derive(Envconfig)]
+pub struct Config {
+    #[envconfig(from = "GOOGLE_CLIENT_ID")]
+    pub google_client_id: String,
+    #[envconfig(from = "GOOGLE_CLIENT_SECRET")]
+    pub google_client_secret: String,
+
+    #[envconfig(from = "ALERTS_SMTP_USERNAME")]
+    pub alerts_smtp_username: String,
+    #[envconfig(from = "ALERTS_SMTP_PASSWORD")]
+    pub alerts_smtp_password: String,
+
+    #[envconfig(from = "YOUTUBE_PLAYLIST_ID")]
+    pub youtube_playlist_id: String,
+
+    #[envconfig(from = "HOSTNAME")]
+    pub hostname: String,
+
+    #[envconfig(from = "EARLIEST_UPDATE")]
+    pub earliest_update: String,
+
+    #[envconfig(from = "DATABASE_URL")]
+    pub database_url: OsString,
+}
+
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
+
+    // Telemetry
+    global::set_tracer_provider(
+        opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(
+                opentelemetry_otlp::SpanExporter::builder()
+                    .with_tonic()
+                    .build()?,
+            )
+            .build(),
+    );
+    global::set_meter_provider(
+        opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_periodic_exporter(
+                opentelemetry_otlp::MetricExporter::builder()
+                    .with_tonic()
+                    .build()?,
+            )
+            .build(),
+    );
 
     tracing_subscriber::registry()
         .with(
@@ -31,45 +78,24 @@ async fn main() -> color_eyre::Result<()> {
                 .with_file(true)
                 .with_line_number(true),
         )
-        .with(
-            tracing_journald::layer()
-                .wrap_err("tracing journald subscriber failed to initialize")?,
-        )
+        .with(tracing_opentelemetry::layer().with_tracer(global::tracer("tracing")))
         .with(ErrorLayer::default())
         .with(EnvFilter::from_default_env())
         .init();
 
-    tracing::trace!("a");
-    tracing::debug!("a");
-    tracing::info!("a");
-    tracing::warn!("a");
-    tracing::error!("a");
+    // tracing::trace!("a");
+    // tracing::debug!("a");
+    // tracing::info!("a");
+    // tracing::warn!("a");
+    // tracing::error!("a");
 
-    let google_client_id = oauth2::ClientId::new(
-        std::env::var("GOOGLE_CLIENT_ID").wrap_err("unable to read GOOGLE_CLIENT_ID env var")?,
-    );
-    let google_client_secret = oauth2::ClientSecret::new(
-        std::env::var("GOOGLE_CLIENT_SECRET")
-            .wrap_err("unable to read GOOGLE_CLIENT_SECRET env var")?,
-    );
+    let config = Config::init_from_env().unwrap();
 
-    let email_credentials = {
-        Credentials::new(
-            std::env::var("ALERTS_SMTP_USERNAME")
-                .wrap_err("unable to read ALERTS_SMTP_USERNAME env var")?,
-            std::env::var("ALERTS_SMTP_PASSWORD")
-                .wrap_err("unable to read ALERTS_SMTP_PASSWORD env var")?,
-        )
-    };
+    let google_client_id = oauth2::ClientId::new(config.google_client_id);
+    let google_client_secret = oauth2::ClientSecret::new(config.google_client_secret);
 
-    let playlist_id = std::env::var("YOUTUBE_PLAYLIST_ID")
-        .wrap_err("Unable to read YOUTUBE_PLAYLIST_ID env var")?;
-
-    let hostname = std::env::var("HOSTNAME").wrap_err("Unable to read HOSTNAME env var")?;
-
-    let earliest_update = Timestamp::from_str(
-        &std::env::var("EARLIEST_UPDATE").wrap_err("Unable to read EARLIEST_UPDATE env var")?,
-    )?;
+    let email_credentials =
+        Credentials::new(config.alerts_smtp_username, config.alerts_smtp_password);
 
     let client = reqwest::ClientBuilder::new()
         .https_only(true)
@@ -86,10 +112,8 @@ async fn main() -> color_eyre::Result<()> {
     let (email_send_tx, email_send_rx) = tokio::sync::mpsc::channel(1);
 
     let database = Database::create(
-        PathBuf::from(
-            std::env::var_os("DATABASE_URL").ok_or_else(|| eyre!("DATABASE_URL not set"))?,
-        ),
-        earliest_update,
+        PathBuf::from(config.database_url),
+        Timestamp::from_str(&config.earliest_update)?,
     )
     .await
     .wrap_err("unable to open database file")?;
@@ -98,17 +122,39 @@ async fn main() -> color_eyre::Result<()> {
         database.clone(),
         google_client_id,
         google_client_secret,
-        hostname.clone(),
+        config.hostname.clone(),
         email_send_tx,
     )
     .await
     .wrap_err("unable to initialize the token manager")?;
 
+    let meter = global::meter("youtube-scraper");
+    let scrapes_counter = meter
+        .u64_counter("scrapes_total")
+        .with_description("Total number of scrapes performed.")
+        .build();
+    let scrapes_counter = meter
+        .u64_counter("videos_added_total")
+        .with_description("Total number of videos added.")
+        .build();
+    let error_counter = meter
+        .u64_counter("errors_total")
+        .with_description("Total number of errors encountered.")
+        .build();
+    let scrape_duration_meter = meter
+        .f64_gauge("last_scrape_duration_seconds")
+        .with_description("Duration of previous scrape.")
+        .build();
+
+    // error_counter.add(1, &[KeyValue::new("a", "b")]);
+
+    // error_counter.add(1, &[KeyValue::new("error.type", error_type)]);
+
     let shutdown = CancellationToken::new();
 
     let tasks = TaskTracker::new();
 
-    // Unauhenticated services
+    // Un-authenticated services
     let mut web_server_task = tasks.spawn(web_server(shutdown.clone(), token_manager.clone()));
 
     // Oauth service
@@ -124,7 +170,7 @@ async fn main() -> color_eyre::Result<()> {
         database.clone(),
         client.clone(),
         token_manager,
-        Arc::from(playlist_id),
+        Arc::from(config.youtube_playlist_id),
     ));
 
     // Shutdown signals

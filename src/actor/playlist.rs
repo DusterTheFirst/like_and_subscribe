@@ -49,6 +49,7 @@ pub async fn playlist_updater(
             }
         };
 
+        // TODO: allow shutdown mid scrape
         for (channel_id, channel_info) in &subscribed_channels {
             let last_update = database.update_date().get(channel_id.clone()).await?;
 
