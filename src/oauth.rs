@@ -3,11 +3,8 @@ use std::{sync::Arc, thread::JoinHandle};
 use eframe::egui::Context;
 use jiff::Timestamp;
 use oauth2::{
-    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
-    EndpointNotSet, EndpointSet, RedirectUrl, RefreshToken, RevocationUrl, StandardTokenResponse,
-    TokenResponse, TokenUrl,
-    basic::{BasicClient, BasicTokenType},
-    ureq,
+    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointNotSet, EndpointSet,
+    RedirectUrl, RefreshToken, RevocationUrl, TokenResponse, TokenUrl, basic::BasicClient, ureq,
     url::Url,
 };
 use tiny_http::{Header, Response};
@@ -15,179 +12,194 @@ use tracing::info;
 
 use crate::database::Database;
 
-#[derive(Debug, Clone)]
-pub struct Authentication {
-    pub access_token: oauth2::AccessToken,
-    pub refresh_token: Option<oauth2::RefreshToken>,
-    pub expires_at: Timestamp,
-}
-
-impl Authentication {
-    pub fn from_token_response(
-        token_response: StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>,
-    ) -> Self {
-        Authentication {
-            access_token: token_response.access_token().clone(),
-            refresh_token: token_response.refresh_token().cloned(),
-            expires_at: Timestamp::now()
-                + token_response
-                    .expires_in()
-                    .expect("expiration should be provided"),
-        }
-    }
-}
-
-pub struct AuthenticationManager {
+pub struct OAuthManager {
     oauth_client:
         Arc<BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointSet, EndpointSet>>,
-    authentication: Option<AuthenticationInternalState>,
     database: Database,
+
+    context: Context,
+
+    state: OAuthState,
 }
 
-enum AuthenticationInternalState {
-    Working {
-        refresh: bool,
-        handle: JoinHandle<Authentication>,
+#[derive(Debug)]
+enum OAuthState {
+    Uninitialized {
+        refresh_token: Option<oauth2::RefreshToken>,
     },
-    Filled(Authentication),
+    Authorizing {
+        handle: JoinHandle<(oauth2::RefreshToken, oauth2::AccessToken, Timestamp)>,
+    },
+    Refreshing {
+        refresh_token: oauth2::RefreshToken,
+        handle: JoinHandle<(oauth2::AccessToken, Timestamp)>,
+    },
+    Authorized {
+        refresh_token: oauth2::RefreshToken,
+        access_token: oauth2::AccessToken,
+        expires_at: Timestamp,
+    },
 }
 
-impl AuthenticationManager {
-    pub fn get_state(&mut self, ctx: &Context) -> AuthenticationState {
-        fn handle_authentication(
-            authentication: Authentication,
-            ctx: &Context,
-        ) -> AuthenticationState {
-            match authentication {
-                Authentication {
-                    access_token,
-                    refresh_token: None,
-                    expires_at,
-                } => {
-                    let validity_period = Timestamp::now().duration_until(expires_at);
-
-                    if validity_period.is_negative() {
-                        return AuthenticationState::Unauthenticated(
-                            UnauthenticatedWithoutRefresh {},
-                        );
-                    }
-
-                    ctx.request_repaint_after_secs(validity_period.as_secs_f32());
-
-                    AuthenticationState::Authenticated(AuthenticatedWithoutRefresh {
-                        access_token,
-                        expires_at,
-                    })
-                }
-                Authentication {
-                    access_token,
-                    refresh_token: Some(refresh_token),
-                    expires_at,
-                } => {
-                    let validity_period = Timestamp::now().duration_until(expires_at);
-
-                    if validity_period.is_negative() {
-                        return AuthenticationState::UnauthenticatedRefresh(
-                            UnauthenticatedWithRefresh { refresh_token },
-                        );
-                    }
-
-                    ctx.request_repaint_after_secs(validity_period.as_secs_f32());
-
-                    AuthenticationState::AuthenticatedRefresh(AuthenticatedWithRefresh {
-                        access_token,
-                        expires_at,
-                        refresh_token,
-                    })
-                }
-            }
-        }
-
-        match self.authentication.take() {
-            Some(AuthenticationInternalState::Working { refresh, handle }) => {
-                if handle.is_finished() {
-                    let auth = handle.join().unwrap();
-                    self.authentication = Some(AuthenticationInternalState::Filled(auth.clone()));
-                    handle_authentication(auth, ctx)
-                } else {
-                    self.authentication =
-                        Some(AuthenticationInternalState::Working { refresh, handle });
-
-                    if refresh {
-                        AuthenticationState::Refreshing
-                    } else {
-                        AuthenticationState::Authenticating
-                    }
-                }
-            }
-            Some(AuthenticationInternalState::Filled(auth)) => {
-                self.authentication = Some(AuthenticationInternalState::Filled(auth.clone()));
-                handle_authentication(auth, ctx)
-            }
-            None => AuthenticationState::Unauthenticated(UnauthenticatedWithoutRefresh {}),
+impl Default for OAuthState {
+    fn default() -> Self {
+        OAuthState::Uninitialized {
+            refresh_token: None,
         }
     }
 }
 
-pub enum AuthenticationState {
-    UnauthenticatedRefresh(UnauthenticatedWithRefresh),
-    Unauthenticated(UnauthenticatedWithoutRefresh),
-    AuthenticatedRefresh(AuthenticatedWithRefresh),
-    Authenticated(AuthenticatedWithoutRefresh),
-    Authenticating,
+impl OAuthManager {
+    // TODO: Get token function with refreshing
+    pub fn block_for_token() {
+
+    }
+
+    pub fn get_state(&mut self) -> AuthorizationState {
+        fn handle_authorized(
+            refresh_token: oauth2::RefreshToken,
+            access_token: oauth2::AccessToken,
+            expires_at: Timestamp,
+            ctx: &Context,
+        ) -> AuthorizationState {
+            let validity_period = Timestamp::now().duration_until(expires_at);
+
+            if validity_period.is_negative() {
+                return AuthorizationState::AuthorizedExpired(AuthorizedExpired { refresh_token });
+            }
+
+            ctx.request_repaint_after_secs(validity_period.as_secs_f32());
+
+            AuthorizationState::Authorized(Authorized {
+                refresh_token,
+                access_token,
+                expires_at,
+            })
+        }
+
+        match std::mem::take(&mut self.state) {
+            state @ OAuthState::Uninitialized {
+                refresh_token: None,
+            } => {
+                self.state = state;
+                AuthorizationState::Unauthorized(Unauthorized {})
+            }
+            OAuthState::Uninitialized {
+                refresh_token: Some(refresh_token),
+            } => {
+                self.refresh(refresh_token.clone());
+                AuthorizationState::Refreshing
+            }
+            OAuthState::Authorizing { handle } => {
+                if handle.is_finished() {
+                    let (refresh_token, access_token, expires_at) = handle.join().unwrap();
+
+                    self.state = OAuthState::Authorized {
+                        refresh_token: refresh_token.clone(),
+                        access_token: access_token.clone(),
+                        expires_at,
+                    };
+                    handle_authorized(refresh_token, access_token, expires_at, &self.context)
+                } else {
+                    self.state = OAuthState::Authorizing { handle };
+                    AuthorizationState::Authorizing
+                }
+            }
+            OAuthState::Refreshing {
+                refresh_token,
+                handle,
+            } => {
+                if handle.is_finished() {
+                    let (access_token, expires_at) = handle.join().unwrap();
+
+                    self.state = OAuthState::Authorized {
+                        refresh_token: refresh_token.clone(),
+                        access_token: access_token.clone(),
+                        expires_at,
+                    };
+                    handle_authorized(refresh_token, access_token, expires_at, &self.context)
+                } else {
+                    self.state = OAuthState::Refreshing {
+                        refresh_token,
+                        handle,
+                    };
+                    AuthorizationState::Refreshing
+                }
+            }
+            OAuthState::Authorized {
+                refresh_token,
+                access_token,
+                expires_at,
+            } => {
+                self.state = OAuthState::Authorized {
+                    refresh_token: refresh_token.clone(),
+                    access_token: access_token.clone(),
+                    expires_at,
+                };
+                handle_authorized(refresh_token, access_token, expires_at, &self.context)
+            }
+        }
+    }
+}
+
+pub enum AuthorizationState {
+    Unauthorized(Unauthorized),
+    Authorized(Authorized),
+    AuthorizedExpired(AuthorizedExpired),
     Refreshing,
+    Authorizing,
 }
 
 pub trait Refresh: Sized {
     fn refresh_token(self) -> oauth2::RefreshToken;
 
-    fn refresh(self, auth_mgr: &mut AuthenticationManager, ctx: Context) {
-        auth_mgr.refresh(self.refresh_token(), ctx);
+    fn refresh(self, auth_mgr: &mut OAuthManager) {
+        auth_mgr.refresh(self.refresh_token());
     }
 }
 
-pub trait Authenticate: Sized {
-    fn authenticate(self, auth_mgr: &mut AuthenticationManager, ctx: Context) {
-        auth_mgr.authenticate(ctx);
+pub trait Authorize: Sized {
+    fn authorize(self, auth_mgr: &mut OAuthManager) {
+        auth_mgr.authorize();
     }
 }
 
-pub struct UnauthenticatedWithRefresh {
+pub struct Unauthorized {}
+impl Authorize for Unauthorized {}
+
+pub struct Authorized {
+    pub access_token: oauth2::AccessToken,
     pub refresh_token: oauth2::RefreshToken,
+    pub expires_at: Timestamp,
 }
-impl Refresh for UnauthenticatedWithRefresh {
+impl Refresh for Authorized {
     fn refresh_token(self) -> oauth2::RefreshToken {
         self.refresh_token
     }
 }
 
-pub struct UnauthenticatedWithoutRefresh {}
-impl Authenticate for UnauthenticatedWithoutRefresh {}
-
-pub struct AuthenticatedWithRefresh {
-    pub access_token: oauth2::AccessToken,
+pub struct AuthorizedExpired {
     pub refresh_token: oauth2::RefreshToken,
-    pub expires_at: Timestamp,
 }
-impl Refresh for AuthenticatedWithRefresh {
+impl Refresh for AuthorizedExpired {
     fn refresh_token(self) -> oauth2::RefreshToken {
         self.refresh_token
     }
 }
-pub struct AuthenticatedWithoutRefresh {
-    pub access_token: oauth2::AccessToken,
-    pub expires_at: Timestamp,
-}
-impl Authenticate for AuthenticatedWithoutRefresh {}
 
-impl AuthenticationManager {
-    pub fn new(client_id: ClientId, client_secret: ClientSecret, database: Database) -> Self {
+impl OAuthManager {
+    pub fn new(
+        client_id: ClientId,
+        client_secret: ClientSecret,
+        database: Database,
+        context: Context,
+    ) -> Self {
         Self {
-            authentication: database
-                .oauth()
-                .get()
-                .map(AuthenticationInternalState::Filled),
+            state: OAuthState::Uninitialized {
+                refresh_token: database.oauth().get(),
+            },
             database,
+            context,
             oauth_client: Arc::new(
                 BasicClient::new(client_id)
                     .set_client_secret(client_secret)
@@ -227,81 +239,86 @@ impl AuthenticationManager {
         authorize_url
     }
 
-    fn authenticate(&mut self, ctx: Context) {
-        info!("Authenticating");
-        let oauth_client = self.oauth_client.clone();
-        let database = self.database.clone();
+    fn authorize(&mut self) {
+        info!("Authorizing");
 
         let handle = std::thread::Builder::new()
             .name("oauth".to_owned())
-            .spawn(move || {
-                let base_url = Url::parse("http://localhost:8081").unwrap();
-                let server = tiny_http::Server::http("localhost:8081").unwrap();
+            .spawn({
+                let oauth_client = self.oauth_client.clone();
+                let database = self.database.clone();
+                let ctx = self.context.clone();
 
-                let request = server.incoming_requests().next().unwrap();
+                move || {
+                    let base_url = Url::parse("http://localhost:8081").unwrap();
+                    let server = tiny_http::Server::http("localhost:8081").unwrap();
 
-                let url = base_url.join(request.url()).unwrap();
+                    let request = server.incoming_requests().next().unwrap();
 
-                let (_, code) = url
-                    .query_pairs()
-                    .find(|(key, _)| key.eq_ignore_ascii_case("code"))
-                    .expect("code url param should exist");
+                    let url = base_url.join(request.url()).unwrap();
 
-                let code = AuthorizationCode::new(code.into_owned());
+                    let (_, code) = url
+                        .query_pairs()
+                        .find(|(key, _)| key.eq_ignore_ascii_case("code"))
+                        .expect("code url param should exist");
 
-                let token_response = oauth_client
-                    .exchange_code(code)
-                    .request(&oauth2::ureq::agent())
-                    .unwrap();
+                    let code = AuthorizationCode::new(code.into_owned());
 
-                let authentication = Authentication::from_token_response(token_response);
+                    let token_response = oauth_client
+                        .exchange_code(code)
+                        .request(&oauth2::ureq::agent())
+                        .unwrap();
 
-                database.oauth().set(authentication.clone());
+                    let expires_at = Timestamp::now() + token_response.expires_in().expect("expiration should be provided");
+                    let refresh_token = token_response.refresh_token().expect("offline authorization should always provide a refresh token");
 
-                const HTML: &str = "<!DOCTYPE html><html><body>Authenticated, you may close this window</body></html>";
+                    database.oauth().set(refresh_token.clone());
 
-                let response = Response::from_string(HTML)
-                    .with_header(Header::from_bytes(b"Content-Type", b"text/html").unwrap());
-                request.respond(response).unwrap();
+                    const HTML: &str = "<!DOCTYPE html><html><body>Authorized, you may close this window</body></html>";
 
-                ctx.request_repaint();
-                authentication
-            })
+                    let response = Response::from_string(HTML)
+                        .with_header(Header::from_bytes(b"Content-Type", b"text/html").unwrap());
+                    request.respond(response).unwrap();
+
+                    ctx.request_repaint();
+                    (refresh_token.clone(), token_response.access_token().clone(), expires_at)
+                }}
+            )
             .unwrap();
 
-        self.authentication = Some(AuthenticationInternalState::Working {
-            handle,
-            refresh: false,
-        });
+        self.state = OAuthState::Authorizing { handle };
     }
 
-    fn refresh(&mut self, refresh_token: RefreshToken, ctx: Context) {
+    fn refresh(&mut self, refresh_token: RefreshToken) {
         info!("Refreshing");
-        let oauth_client = self.oauth_client.clone();
-        let database = self.database.clone();
 
         let handle = std::thread::Builder::new()
             .name("oauth".to_owned())
-            .spawn(move || {
-                let refresh_result = oauth_client
-                    .exchange_refresh_token(&refresh_token)
-                    // Request refresh token
-                    .add_extra_param("access_type", "offline")
-                    .request(&ureq::agent())
-                    .unwrap();
+            .spawn({
+                let oauth_client = self.oauth_client.clone();
+                let refresh_token = refresh_token.clone();
+                let ctx: Context = self.context.clone();
 
-                let authentication = Authentication::from_token_response(refresh_result);
+                move || {
+                    let refresh_result = oauth_client
+                        .exchange_refresh_token(&refresh_token)
+                        .request(&ureq::agent())
+                        .unwrap();
 
-                database.oauth().set(authentication.clone());
+                    let expires_at = Timestamp::now()
+                        + refresh_result
+                            .expires_in()
+                            .expect("expiration should be provided");
 
-                ctx.request_repaint();
-                authentication
+                    ctx.request_repaint();
+                    (refresh_result.access_token().clone(), expires_at)
+                }
             })
             .unwrap();
 
-        self.authentication = Some(AuthenticationInternalState::Working {
+        self.state = OAuthState::Refreshing {
+            refresh_token,
             handle,
-            refresh: true,
-        });
+        };
     }
 }

@@ -1,14 +1,14 @@
-use eframe::egui::{Button, CentralPanel};
-use jiff::{SignedDuration, Timestamp, Zoned, civil::DateTime, tz::TimeZone};
+use eframe::egui::{CentralPanel, ProgressBar};
+use jiff::tz::TimeZone;
 
-use crate::oauth::{Authenticate as _, AuthenticationManager, AuthenticationState, Refresh as _};
+use crate::oauth::{AuthorizationState, Authorize as _, OAuthManager, Refresh as _};
 
 pub struct AppUi {
-    auth: AuthenticationManager,
+    auth: OAuthManager,
 }
 
 impl AppUi {
-    pub fn new(auth: AuthenticationManager) -> Self {
+    pub fn new(auth: OAuthManager) -> Self {
         AppUi { auth }
     }
 }
@@ -16,61 +16,55 @@ impl AppUi {
 impl eframe::App for AppUi {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
         CentralPanel::default().show(ctx, |ui| {
-            let access_token = match self.auth.get_state(ctx) {
-                AuthenticationState::UnauthenticatedRefresh(unauth) => {
-                    ui.label("Unauthenticated");
+            let is_authorized = match self.auth.get_state() {
+                AuthorizationState::AuthorizedExpired(unauth) => {
+                    ui.label("Authorized but expired");
                     if ui.button("Refresh").clicked() {
-                        unauth.refresh(&mut self.auth, ctx.clone());
+                        unauth.refresh(&mut self.auth);
                     }
-                    None
+                    true
                 }
-                AuthenticationState::Unauthenticated(unauth) => {
-                    ui.label("Unauthenticated");
+                AuthorizationState::Unauthorized(unauth) => {
+                    ui.label("Unauthorized");
                     if ui.link("Copy Login Link").clicked() {
                         ctx.copy_text(self.auth.get_auth_url().into());
-                        unauth.authenticate(&mut self.auth, ctx.clone());
+                        unauth.authorize(&mut self.auth);
                     }
-                    None
+                    false
                 }
-                AuthenticationState::AuthenticatedRefresh(auth) => {
-                    ui.label("Authenticated with refresh token until");
+                AuthorizationState::Authorized(auth) => {
+                    ui.horizontal(|ui| {
+                        ui.label("Authorized with access until");
+                        ui.label(
+                            auth.expires_at
+                                .to_zoned(TimeZone::system())
+                                .strftime("%A, %B %d, %Y at %H:%M%P %Q")
+                                .to_string(),
+                        );
+                    });
 
-                    ui.label(
-                        auth.expires_at
-                            .to_zoned(TimeZone::system())
-                            .strftime("%A, %B %d, %Y at %H:%M%P %Q")
-                            .to_string(),
-                    );
+                    if ui.button("Refresh").clicked() {
+                        auth.refresh(&mut self.auth);
+                    }
 
-                    Some(auth.access_token)
+                    true
                 }
-                AuthenticationState::Authenticated(auth) => {
-                    ui.label("Authenticated until");
-                    ui.label(
-                        auth.expires_at
-                            .to_zoned(TimeZone::system())
-                            .strftime("%A, %B %d, %Y at %H:%M%P %Q")
-                            .to_string(),
-                    );
-
-                    Some(auth.access_token)
-                }
-                AuthenticationState::Authenticating => {
-                    ui.label("Authenticating....");
+                AuthorizationState::Authorizing => {
+                    ui.label("Authorizing....");
                     ui.spinner();
                     if ui.link("Copy Login Link").clicked() {
                         ctx.copy_text(self.auth.get_auth_url().into());
                     }
-                    None
+                    false
                 }
-                AuthenticationState::Refreshing => {
+                AuthorizationState::Refreshing => {
                     ui.label("Refreshing....");
                     ui.spinner();
-                    None
+                    true
                 }
             };
 
-            let Some(access_token) = access_token else {
+            if !is_authorized {
                 ui.centered_and_justified(|ui| ui.label("Log in first please"));
                 return;
             };
@@ -80,6 +74,8 @@ impl eframe::App for AppUi {
             ui.button("Discover Channels");
             ui.button("Find new uploads");
             ui.button("Add new uploads to playlist");
+
+            ui.add(ProgressBar::new(0.2));
         });
     }
 }

@@ -1,10 +1,8 @@
 use std::{path::PathBuf, sync::Arc};
 
 use jiff::Timestamp;
-use oauth2::{AccessToken, RefreshToken};
+use oauth2::RefreshToken;
 use redb::{ReadableDatabase as _, TableDefinition};
-
-use crate::oauth::Authentication;
 
 #[derive(Clone)]
 pub struct Database {
@@ -36,28 +34,17 @@ impl Database {
     }
 }
 
-type OAuthStorage<'s> = (&'s str, Option<&'s str>, i64);
 pub struct OAuth<'a> {
     database: &'a Database,
 }
 impl<'a> OAuth<'a> {
-    const TABLE: TableDefinition<'static, (), OAuthStorage<'static>> =
-        TableDefinition::new("oauth");
+    const TABLE: TableDefinition<'static, (), &'static str> = TableDefinition::new("oauth");
 
-    pub fn set(&self, auth: Authentication) {
+    pub fn set(&self, refresh_token: RefreshToken) {
         let write_txn = self.database.connection.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(Self::TABLE).unwrap();
-            table
-                .insert(
-                    (),
-                    &(
-                        auth.access_token.secret().as_str(),
-                        auth.refresh_token.as_ref().map(|t| t.secret().as_str()),
-                        auth.expires_at.as_millisecond(),
-                    ),
-                )
-                .unwrap();
+            table.insert((), refresh_token.secret().as_str()).unwrap();
         }
         write_txn.commit().unwrap();
     }
@@ -71,20 +58,14 @@ impl<'a> OAuth<'a> {
         write_txn.commit().unwrap();
     }
 
-    pub fn get(&self) -> Option<Authentication> {
+    pub fn get(&self) -> Option<RefreshToken> {
         let read_txn = self.database.connection.begin_read().unwrap();
         let table = read_txn.open_table(Self::TABLE).unwrap();
 
         if let Some(value) = table.get(()).unwrap() {
-            let (access_token, refresh_token, expires_at) = value.value();
+            let refresh_token = value.value();
 
-            Some(Authentication {
-                access_token: AccessToken::new(access_token.to_owned()),
-                refresh_token: refresh_token
-                    .map(|refresh_token| RefreshToken::new(refresh_token.to_owned())),
-                expires_at: Timestamp::from_millisecond(expires_at)
-                    .expect("timestamp should always be within the valid range"),
-            })
+            Some(RefreshToken::new(refresh_token.to_owned()))
         } else {
             None
         }
@@ -112,13 +93,8 @@ impl<'a> UpdateDate<'a> {
         let read_txn = self.database.connection.begin_read().unwrap();
         let table = read_txn.open_table(Self::TABLE).unwrap();
 
-        if let Some(value) = table.get(channel_id).unwrap() {
-            Some(
-                Timestamp::from_millisecond(value.value())
-                    .expect("stored timestamp should be valid"),
-            )
-        } else {
-            None
-        }
+        table.get(channel_id).unwrap().map(|value| {
+            Timestamp::from_millisecond(value.value()).expect("stored timestamp should be valid")
+        })
     }
 }

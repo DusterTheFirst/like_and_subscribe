@@ -5,9 +5,9 @@ use envconfig::Envconfig;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
-use crate::{database::Database, oauth::AuthenticationManager, ui::AppUi};
+use crate::{database::Database, oauth::OAuthManager, ui::AppUi};
 
-// mod actor;
+mod api;
 mod database;
 mod oauth;
 mod ui;
@@ -52,36 +52,13 @@ fn main() -> eframe::Result<()> {
         NativeOptions {
             ..Default::default()
         },
-        Box::new(move |_cc| {
-            Ok(Box::new(AppUi::new(AuthenticationManager::new(
+        Box::new(move |cc| {
+            Ok(Box::new(AppUi::new(OAuthManager::new(
                 oauth2::ClientId::new(config.google_client_id),
                 oauth2::ClientSecret::new(config.google_client_secret),
                 database.clone(),
+                cc.egui_ctx.clone(),
             ))))
         }),
     )
-
-    // let token_manager = TokenManager::init(
-    //     database.clone(),
-    //     google_client_id,
-    //     google_client_secret,
-    //     config.hostname.clone(),
-    //     email_send_tx,
-    // )
-    // .await
-    // .wrap_err("unable to initialize the token manager")?;
-
-    // // Oauth service
-    // let mut web_server_task = tasks.spawn(web_server(shutdown.clone(), token_manager.clone()));
-
-    // // Authenticated services
-    // let mut subscription_task = tasks.spawn(playlist_updater(
-    //     shutdown.clone(),
-    //     database.clone(),
-    //     client.clone(),
-    //     token_manager,
-    //     Arc::from(config.youtube_playlist_id),
-    // ));
-
-    // Ok(())
 }
