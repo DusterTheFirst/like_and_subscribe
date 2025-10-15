@@ -1,28 +1,37 @@
-use eframe::egui::{CentralPanel, ProgressBar};
+use eframe::egui::{CentralPanel, ProgressBar, ahash::HashMap};
+use egui_extras::{Column, Table, TableBuilder};
 use jiff::tz::TimeZone;
 
-use crate::oauth::{AuthorizationState, Authorize as _, OAuthManager, Refresh as _};
+use crate::{
+    api::channels::{ChannelDiscovery, ChannelDiscoveryState, ChannelMetadata},
+    oauth::{AuthorizationState, Authorize as _, OAuthManager, Refresh as _},
+};
 
 pub struct AppUi {
     auth: OAuthManager,
+
+    channel_discovery: ChannelDiscovery,
 }
 
 impl AppUi {
-    pub fn new(auth: OAuthManager) -> Self {
-        AppUi { auth }
+    pub fn new(auth: OAuthManager, channel_discovery: ChannelDiscovery) -> Self {
+        AppUi {
+            auth,
+            channel_discovery,
+        }
     }
 }
 
 impl eframe::App for AppUi {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
         CentralPanel::default().show(ctx, |ui| {
-            let is_authorized = match self.auth.get_state() {
+            let access_token = match self.auth.get_state() {
                 AuthorizationState::AuthorizedExpired(unauth) => {
                     ui.label("Authorized but expired");
                     if ui.button("Refresh").clicked() {
                         unauth.refresh(&mut self.auth);
                     }
-                    true
+                    None
                 }
                 AuthorizationState::Unauthorized(unauth) => {
                     ui.label("Unauthorized");
@@ -30,7 +39,7 @@ impl eframe::App for AppUi {
                         ctx.copy_text(self.auth.get_auth_url().into());
                         unauth.authorize(&mut self.auth);
                     }
-                    false
+                    None
                 }
                 AuthorizationState::Authorized(auth) => {
                     ui.horizontal(|ui| {
@@ -45,9 +54,10 @@ impl eframe::App for AppUi {
 
                     if ui.button("Refresh").clicked() {
                         auth.refresh(&mut self.auth);
+                        None
+                    } else {
+                        Some(auth.access_token)
                     }
-
-                    true
                 }
                 AuthorizationState::Authorizing => {
                     ui.label("Authorizing....");
@@ -55,27 +65,100 @@ impl eframe::App for AppUi {
                     if ui.link("Copy Login Link").clicked() {
                         ctx.copy_text(self.auth.get_auth_url().into());
                     }
-                    false
+                    None
                 }
                 AuthorizationState::Refreshing => {
                     ui.label("Refreshing....");
                     ui.spinner();
-                    true
+                    None
                 }
             };
 
-            if !is_authorized {
-                ui.centered_and_justified(|ui| ui.label("Log in first please"));
+            let Some(access_token) = access_token else {
+                ui.centered_and_justified(|ui| {
+                    ui.label("Token expired, please refresh or authorize")
+                });
                 return;
             };
 
             ui.separator();
 
-            ui.button("Discover Channels");
             ui.button("Find new uploads");
             ui.button("Add new uploads to playlist");
 
-            ui.add(ProgressBar::new(0.2));
+            let channels = match self.channel_discovery.state() {
+                ChannelDiscoveryState::Idle(mut idle) => {
+                    if ui.button("Discover Channels").clicked() {
+                        idle.start(access_token);
+                    };
+                    &HashMap::default()
+                }
+                ChannelDiscoveryState::Discovering {
+                    discovered_channels,
+                    total_channel_count,
+                } => {
+                    match total_channel_count {
+                        Some(total) => {
+                            ui.add(
+                                ProgressBar::new(
+                                    (discovered_channels.len() as f32) / (total as f32),
+                                )
+                                .show_percentage(),
+                            );
+                        }
+                        None => {
+                            ui.add(ProgressBar::new(0.0));
+                        }
+                    }
+                    discovered_channels
+                }
+                ChannelDiscoveryState::Complete {
+                    discovered_channels,
+                } => discovered_channels,
+            };
+
+            let mut rows: Vec<_> = channels.iter().collect();
+            // FIXME: memoize
+            rows.sort_unstable_by_key(|(k, m)| &m.name);
+
+            // TODO: calculate quota?
+
+            TableBuilder::new(ui)
+                .column(Column::exact(150.0))
+                .column(Column::exact(150.0).resizable(true))
+                .column(Column::remainder())
+                .header(20.0, |mut row| {
+                    row.col(|ui| {
+                        ui.heading("Channel Id");
+                    });
+                    row.col(|ui| {
+                        ui.heading("Channel Name");
+                    });
+                    row.col(|ui| {
+                        ui.heading("Channel Profile");
+                    });
+                })
+                .body(|body| {
+                    body.rows(40.0, rows.len(), |mut row| {
+                        let (
+                            channel_id,
+                            ChannelMetadata {
+                                name,
+                                profile_picture,
+                            },
+                        ) = rows[row.index()];
+
+                        row.col(|ui| {
+                            ui.monospace(channel_id);
+                        });
+                        row.col(|ui| {
+                            ui.label(name);
+                        });
+                        row.col(|ui| {
+                            ui.image(profile_picture);
+                        });
+                    });
+                });
         });
     }
 }

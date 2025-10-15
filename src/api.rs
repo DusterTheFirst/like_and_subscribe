@@ -1,1 +1,1 @@
-mod channels;
+pub mod channels;

@@ -5,7 +5,7 @@ use envconfig::Envconfig;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
-use crate::{database::Database, oauth::OAuthManager, ui::AppUi};
+use crate::{api::channels::ChannelDiscovery, database::Database, oauth::OAuthManager, ui::AppUi};
 
 mod api;
 mod database;
@@ -53,12 +53,17 @@ fn main() -> eframe::Result<()> {
             ..Default::default()
         },
         Box::new(move |cc| {
-            Ok(Box::new(AppUi::new(OAuthManager::new(
-                oauth2::ClientId::new(config.google_client_id),
-                oauth2::ClientSecret::new(config.google_client_secret),
-                database.clone(),
-                cc.egui_ctx.clone(),
-            ))))
+            egui_extras::loaders::install_image_loaders(&cc.egui_ctx);
+
+            Ok(Box::new(AppUi::new(
+                OAuthManager::new(
+                    oauth2::ClientId::new(config.google_client_id),
+                    oauth2::ClientSecret::new(config.google_client_secret),
+                    database.clone(),
+                    cc.egui_ctx.clone(),
+                ),
+                ChannelDiscovery::new(cc.egui_ctx.clone()),
+            )))
         }),
     )
 }
