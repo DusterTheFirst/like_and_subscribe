@@ -4,29 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-axum                  = "0.8.4"
-axum-extra            = { version = "0.10.1", features = ["error-response", "typed-header"] }
-bstr                  = "1.12.0"
-color-eyre            = "0.6.5"
-futures               = "0.3.31"
-google-youtube3       = { version = "6.0.0", default-features = false }
-jiff                  = { version = "0.2.15", features = ["serde"] }
-reqwest               = { version = "0.12.22", default-features = false, features = ["brotli", "charset", "deflate", "gzip", "http2", "json", "rustls-tls-native-roots", "system-proxy", "zstd"] }
-serde                 = "1.0.219"
-serde_derive          = "1.0.219"
-serde_json            = "1.0.141"
-tokio                 = { version = "1.47.0", features = ["full"] }
-tokio-util            = { version = "0.7.16", features = ["rt"] }
-tower                 = { version = "0.5.2", features = ["buffer", "limit"] }
-tower-http            = { version = "0.6.6", features = ["compression-br", "compression-deflate", "compression-gzip", "compression-zstd", "fs", "trace"] }
-tracing               = "0.1.41"
-tracing-error         = "0.2.1"
-tracing-subscriber    = { version = "0.3.19", features = ["env-filter"] }
-oauth2                = "5.0.0"
-mail-send             = { version = "0.5.2", default-features = false, features = ["builder"] }
-redb                  = "3.0.2"
-opentelemetry         = { version = "0.31.0", features = ["metrics"] }
-opentelemetry_sdk     = { version = "0.31.0", features = ["rt-tokio"] }
-opentelemetry-otlp    = { version = "0.31.0", features = ["grpc-tonic"] }
-envconfig             = "0.11.0"
-tracing-opentelemetry = "0.32.0"
+bstr               = "1.12.0"
+google-youtube3    = { version = "6.0.0", default-features = false }
+jiff               = { version = "0.2.15", features = ["serde"] }
+serde              = "1.0.219"
+serde_derive       = "1.0.219"
+serde_json         = "1.0.141"
+tracing            = "0.1.41"
+tracing-error      = "0.2.1"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+oauth2             = { version = "5.0.0", default-features = false, features = ["ureq"] }
+redb               = "3.0.2"
+envconfig          = "0.11.0"
+eframe             = "0.33.0"
+ehttp              = "0.5.0"
+tiny_http          = "0.12.0"

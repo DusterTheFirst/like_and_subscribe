@@ -1,164 +1,216 @@
-use std::sync::Arc;
+use std::{sync::Arc, thread::JoinHandle};
 
-use color_eyre::eyre::{Context, ContextCompat};
-use jiff::{SignedDuration, Timestamp};
-use mail_send::mail_builder::MessageBuilder;
+use eframe::egui::Context;
+use jiff::Timestamp;
 use oauth2::{
-    AccessToken, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
-    EmptyExtraTokenFields, EndpointNotSet, EndpointSet, RedirectUrl, RevocationUrl,
-    StandardTokenResponse, TokenResponse, TokenUrl,
+    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
+    EndpointNotSet, EndpointSet, RedirectUrl, RefreshToken, RevocationUrl, StandardTokenResponse,
+    TokenResponse, TokenUrl,
     basic::{BasicClient, BasicTokenType},
+    ureq,
+    url::Url,
 };
-use tokio::sync::{Mutex, Notify, mpsc};
+use tiny_http::{Header, Response};
+use tracing::info;
 
 use crate::database::Database;
 
 #[derive(Debug, Clone)]
 pub struct Authentication {
     pub access_token: oauth2::AccessToken,
-    pub refresh_token: oauth2::RefreshToken,
+    pub refresh_token: Option<oauth2::RefreshToken>,
     pub expires_at: Timestamp,
 }
 
-#[derive(Clone)]
-pub struct TokenManager {
-    inner: Arc<TokenManagerInner>,
+impl Authentication {
+    pub fn from_token_response(
+        token_response: StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>,
+    ) -> Self {
+        Authentication {
+            access_token: token_response.access_token().clone(),
+            refresh_token: token_response.refresh_token().cloned(),
+            expires_at: Timestamp::now()
+                + token_response
+                    .expires_in()
+                    .expect("expiration should be provided"),
+        }
+    }
 }
-impl TokenManager {
-    pub async fn init(
-        database: Database,
-        client_id: ClientId,
-        client_secret: ClientSecret,
-        hostname: String,
-        mail_send: mpsc::Sender<MessageBuilder<'static>>,
-    ) -> Result<Self, redb::Error> {
-        let oauth_client = BasicClient::new(client_id)
-            .set_client_secret(client_secret)
-            .set_auth_uri(
-                AuthUrl::new("https://accounts.google.com/o/oauth2/auth".to_string()).unwrap(),
-            )
-            .set_token_uri(
-                TokenUrl::new("https://oauth2.googleapis.com/token".to_string()).unwrap(),
-            )
-            .set_revocation_url(
-                RevocationUrl::new("https://oauth2.googleapis.com/revoke".to_string()).unwrap(),
-            )
-            .set_redirect_uri(RedirectUrl::new(format!("https://{hostname}/admin/auth")).unwrap());
 
-        let reqwest_client = reqwest::Client::builder()
-            // Following redirects opens the client up to SSRF vulnerabilities.
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap();
+pub struct AuthenticationManager {
+    oauth_client:
+        Arc<BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointSet, EndpointSet>>,
+    authentication: Option<AuthenticationInternalState>,
+    database: Database,
+}
 
-        Ok(Self {
-            inner: Arc::new(TokenManagerInner {
-                oauth_client,
-                reqwest_client,
-                mail_send,
-                current_token: Mutex::new(match database.oauth().get().await? {
-                    Some(t) => TokenStatus::Existing(t),
-                    None => TokenStatus::Missing { alerted: false },
-                }),
-                notify: Notify::new(),
-                database,
-            }),
-        })
-    }
+enum AuthenticationInternalState {
+    Working {
+        refresh: bool,
+        handle: JoinHandle<Authentication>,
+    },
+    Filled(Authentication),
+}
 
-    pub async fn load_new_token(&self, code: AuthorizationCode) -> color_eyre::Result<()> {
-        let token_response = self
-            .inner
-            .oauth_client
-            .exchange_code(code)
-            .request_async(&self.inner.reqwest_client)
-            .await
-            .wrap_err("unable to exchange code")?;
-
-        let authentication = Authentication::from_token_response(token_response)?;
-
-        *self.inner.current_token.lock().await = TokenStatus::Existing(authentication.clone());
-        tracing::trace!("notifying wait_for_token waiters");
-        self.inner.notify.notify_waiters();
-        self.inner
-            .database
-            .oauth()
-            .set(authentication)
-            .await
-            .wrap_err("unable to save new access token into the database")?;
-
-        Ok(())
-    }
-
-    pub async fn wait_for_token(&self) -> Result<AccessToken, redb::Error> {
-        loop {
-            let mut token = self.inner.current_token.lock().await;
-
-            match &mut *token {
-                TokenStatus::Existing(authentication) => {
-                    if Timestamp::now().duration_until(authentication.expires_at)
-                        >= SignedDuration::ZERO
-                    {
-                        return Ok(authentication.access_token.clone());
-                    }
-
-                    let refresh_result = self
-                        .inner
-                        .oauth_client
-                        .exchange_refresh_token(&authentication.refresh_token)
-                        // Request refresh token
-                        .add_extra_param("access_type", "offline")
-                        .request_async(&self.inner.reqwest_client)
-                        .await;
-
-                    match refresh_result {
-                        Ok(token_response) => {
-                            let authentication =
-                                Authentication::from_token_response(token_response);
-
-                            match authentication {
-                                Ok(authentication) => {
-                                    let access_token = authentication.access_token.clone();
-                                    self.inner.database.oauth().set(authentication).await?;
-
-                                    return Ok(access_token);
-                                }
-                                Err(error) => {
-                                    tracing::error!(%error, "failed to handle token response");
-                                    self.inner.database.oauth().delete().await?;
-                                    self.send_email().await;
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            tracing::error!(%error, "failed to refresh access token");
-                            self.inner.database.oauth().delete().await?;
-                            self.send_email().await;
-                        }
-                    }
-                }
-                TokenStatus::Missing { alerted: true } => {}
-                TokenStatus::Missing {
-                    alerted: alerted @ false,
+impl AuthenticationManager {
+    pub fn get_state(&mut self, ctx: &Context) -> AuthenticationState {
+        fn handle_authentication(
+            authentication: Authentication,
+            ctx: &Context,
+        ) -> AuthenticationState {
+            match authentication {
+                Authentication {
+                    access_token,
+                    refresh_token: None,
+                    expires_at,
                 } => {
-                    self.send_email().await;
-                    *alerted = true;
-                }
-            };
+                    let validity_period = Timestamp::now().duration_until(expires_at);
 
-            // Wait for token to be loaded
-            drop(token);
-            tracing::debug!("waiting for new token to be obtained");
-            self.inner.notify.notified().await;
-            tracing::debug!("token obtained");
+                    if validity_period.is_negative() {
+                        return AuthenticationState::Unauthenticated(
+                            UnauthenticatedWithoutRefresh {},
+                        );
+                    }
+
+                    ctx.request_repaint_after_secs(validity_period.as_secs_f32());
+
+                    AuthenticationState::Authenticated(AuthenticatedWithoutRefresh {
+                        access_token,
+                        expires_at,
+                    })
+                }
+                Authentication {
+                    access_token,
+                    refresh_token: Some(refresh_token),
+                    expires_at,
+                } => {
+                    let validity_period = Timestamp::now().duration_until(expires_at);
+
+                    if validity_period.is_negative() {
+                        return AuthenticationState::UnauthenticatedRefresh(
+                            UnauthenticatedWithRefresh { refresh_token },
+                        );
+                    }
+
+                    ctx.request_repaint_after_secs(validity_period.as_secs_f32());
+
+                    AuthenticationState::AuthenticatedRefresh(AuthenticatedWithRefresh {
+                        access_token,
+                        expires_at,
+                        refresh_token,
+                    })
+                }
+            }
+        }
+
+        match self.authentication.take() {
+            Some(AuthenticationInternalState::Working { refresh, handle }) => {
+                if handle.is_finished() {
+                    let auth = handle.join().unwrap();
+                    self.authentication = Some(AuthenticationInternalState::Filled(auth.clone()));
+                    handle_authentication(auth, ctx)
+                } else {
+                    self.authentication =
+                        Some(AuthenticationInternalState::Working { refresh, handle });
+
+                    if refresh {
+                        AuthenticationState::Refreshing
+                    } else {
+                        AuthenticationState::Authenticating
+                    }
+                }
+            }
+            Some(AuthenticationInternalState::Filled(auth)) => {
+                self.authentication = Some(AuthenticationInternalState::Filled(auth.clone()));
+                handle_authentication(auth, ctx)
+            }
+            None => AuthenticationState::Unauthenticated(UnauthenticatedWithoutRefresh {}),
+        }
+    }
+}
+
+pub enum AuthenticationState {
+    UnauthenticatedRefresh(UnauthenticatedWithRefresh),
+    Unauthenticated(UnauthenticatedWithoutRefresh),
+    AuthenticatedRefresh(AuthenticatedWithRefresh),
+    Authenticated(AuthenticatedWithoutRefresh),
+    Authenticating,
+    Refreshing,
+}
+
+pub trait Refresh: Sized {
+    fn refresh_token(self) -> oauth2::RefreshToken;
+
+    fn refresh(self, auth_mgr: &mut AuthenticationManager, ctx: Context) {
+        auth_mgr.refresh(self.refresh_token(), ctx);
+    }
+}
+
+pub trait Authenticate: Sized {
+    fn authenticate(self, auth_mgr: &mut AuthenticationManager, ctx: Context) {
+        auth_mgr.authenticate(ctx);
+    }
+}
+
+pub struct UnauthenticatedWithRefresh {
+    pub refresh_token: oauth2::RefreshToken,
+}
+impl Refresh for UnauthenticatedWithRefresh {
+    fn refresh_token(self) -> oauth2::RefreshToken {
+        self.refresh_token
+    }
+}
+
+pub struct UnauthenticatedWithoutRefresh {}
+impl Authenticate for UnauthenticatedWithoutRefresh {}
+
+pub struct AuthenticatedWithRefresh {
+    pub access_token: oauth2::AccessToken,
+    pub refresh_token: oauth2::RefreshToken,
+    pub expires_at: Timestamp,
+}
+impl Refresh for AuthenticatedWithRefresh {
+    fn refresh_token(self) -> oauth2::RefreshToken {
+        self.refresh_token
+    }
+}
+pub struct AuthenticatedWithoutRefresh {
+    pub access_token: oauth2::AccessToken,
+    pub expires_at: Timestamp,
+}
+impl Authenticate for AuthenticatedWithoutRefresh {}
+
+impl AuthenticationManager {
+    pub fn new(client_id: ClientId, client_secret: ClientSecret, database: Database) -> Self {
+        Self {
+            authentication: database
+                .oauth()
+                .get()
+                .map(AuthenticationInternalState::Filled),
+            database,
+            oauth_client: Arc::new(
+                BasicClient::new(client_id)
+                    .set_client_secret(client_secret)
+                    .set_auth_uri(
+                        AuthUrl::new("https://accounts.google.com/o/oauth2/auth".to_string())
+                            .unwrap(),
+                    )
+                    .set_token_uri(
+                        TokenUrl::new("https://oauth2.googleapis.com/token".to_string()).unwrap(),
+                    )
+                    .set_revocation_url(
+                        RevocationUrl::new("https://oauth2.googleapis.com/revoke".to_string())
+                            .unwrap(),
+                    )
+                    .set_redirect_uri(
+                        RedirectUrl::new("http://localhost:8081".to_string()).unwrap(),
+                    ),
+            ),
         }
     }
 
-    // TODO: explain the reason for the re-auth
-    async fn send_email(&self) {
-        tracing::info!("Queuing email");
+    pub fn get_auth_url(&self) -> Url {
         let (authorize_url, _) = self
-            .inner
             .oauth_client
             .authorize_url(|| CsrfToken::new("TODO:FIXME:?".to_string()))
             .add_scope(oauth2::Scope::new(
@@ -172,45 +224,84 @@ impl TokenManager {
             .add_extra_param("prompt", "consent")
             .url();
 
-        let message = MessageBuilder::new()
-            .subject("Re-authenticate with google to continue")
-            .html_body(format!(r##"<a href="{0}">{0}</a>"##, authorize_url));
-
-        self.inner.mail_send.send(message).await.unwrap();
+        authorize_url
     }
-}
 
-impl Authentication {
-    pub fn from_token_response(
-        token_response: StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>,
-    ) -> color_eyre::Result<Self> {
-        Ok(Authentication {
-            access_token: token_response.access_token().clone(),
-            refresh_token: token_response
-                .refresh_token()
-                .wrap_err("no refresh token was provided")?
-                .clone(),
-            expires_at: Timestamp::now()
-                + token_response
-                    .expires_in()
-                    .wrap_err("no expiration was provided")?,
-        })
+    fn authenticate(&mut self, ctx: Context) {
+        info!("Authenticating");
+        let oauth_client = self.oauth_client.clone();
+        let database = self.database.clone();
+
+        let handle = std::thread::Builder::new()
+            .name("oauth".to_owned())
+            .spawn(move || {
+                let base_url = Url::parse("http://localhost:8081").unwrap();
+                let server = tiny_http::Server::http("localhost:8081").unwrap();
+
+                let request = server.incoming_requests().next().unwrap();
+
+                let url = base_url.join(request.url()).unwrap();
+
+                let (_, code) = url
+                    .query_pairs()
+                    .find(|(key, _)| key.eq_ignore_ascii_case("code"))
+                    .expect("code url param should exist");
+
+                let code = AuthorizationCode::new(code.into_owned());
+
+                let token_response = oauth_client
+                    .exchange_code(code)
+                    .request(&oauth2::ureq::agent())
+                    .unwrap();
+
+                let authentication = Authentication::from_token_response(token_response);
+
+                database.oauth().set(authentication.clone());
+
+                const HTML: &str = "<!DOCTYPE html><html><body>Authenticated, you may close this window</body></html>";
+
+                let response = Response::from_string(HTML)
+                    .with_header(Header::from_bytes(b"Content-Type", b"text/html").unwrap());
+                request.respond(response).unwrap();
+
+                ctx.request_repaint();
+                authentication
+            })
+            .unwrap();
+
+        self.authentication = Some(AuthenticationInternalState::Working {
+            handle,
+            refresh: false,
+        });
     }
-}
 
-struct TokenManagerInner {
-    oauth_client:
-        BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointSet, EndpointSet>,
-    mail_send: mpsc::Sender<MessageBuilder<'static>>,
+    fn refresh(&mut self, refresh_token: RefreshToken, ctx: Context) {
+        info!("Refreshing");
+        let oauth_client = self.oauth_client.clone();
+        let database = self.database.clone();
 
-    reqwest_client: reqwest::Client,
-    database: Database,
+        let handle = std::thread::Builder::new()
+            .name("oauth".to_owned())
+            .spawn(move || {
+                let refresh_result = oauth_client
+                    .exchange_refresh_token(&refresh_token)
+                    // Request refresh token
+                    .add_extra_param("access_type", "offline")
+                    .request(&ureq::agent())
+                    .unwrap();
 
-    current_token: Mutex<TokenStatus>,
-    notify: Notify,
-}
+                let authentication = Authentication::from_token_response(refresh_result);
 
-enum TokenStatus {
-    Missing { alerted: bool },
-    Existing(Authentication),
+                database.oauth().set(authentication.clone());
+
+                ctx.request_repaint();
+                authentication
+            })
+            .unwrap();
+
+        self.authentication = Some(AuthenticationInternalState::Working {
+            handle,
+            refresh: true,
+        });
+    }
 }
