@@ -8,8 +8,38 @@ use eframe::egui::{
     Context,
     ahash::{HashMap, HashMapExt},
 };
-use google_youtube3::api::{ChannelListResponse, SubscriptionListResponse};
+use google_youtube3::api::{
+    ChannelListResponse, PlaylistItemListResponse, SubscriptionListResponse,
+};
+use jiff::Timestamp;
 use oauth2::{AccessToken, ureq};
+
+#[nutype::nutype(derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Display))]
+pub struct ChannelId(String);
+
+#[nutype::nutype(derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Display))]
+pub struct PlaylistId(String);
+
+#[nutype::nutype(derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Display))]
+pub struct VideoId(String);
+
+#[nutype::nutype(derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Display))]
+pub struct PlaylistItemId(String);
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub struct ChannelMetadata {
+    pub name: String,
+    pub profile_picture: String,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub struct VideoMetadata {
+    pub id: VideoId,
+    pub title: String,
+    pub thumbnail: String,
+    pub published_at: Timestamp,
+    pub position: u32,
+}
 
 pub struct ChannelDiscovery {
     context: Context,
@@ -30,7 +60,7 @@ impl ChannelDiscovery {
     ) -> R {
         let mut new_state = match std::mem::take(&mut self.state) {
             ChannelDiscoveryState::Discovering(Discovering {
-                mut discovered_channels,
+                channels: mut discovered_channels,
                 mut total_channel_count,
                 handle,
                 incoming,
@@ -42,11 +72,11 @@ impl ChannelDiscovery {
 
                 if handle.is_finished() {
                     ChannelDiscoveryState::Discovered(Discovered {
-                        discovered_channels,
+                        channels: discovered_channels,
                     })
                 } else {
                     ChannelDiscoveryState::Discovering(Discovering {
-                        discovered_channels,
+                        channels: discovered_channels,
                         total_channel_count,
                         handle,
                         incoming,
@@ -54,7 +84,7 @@ impl ChannelDiscovery {
                 }
             }
             ChannelDiscoveryState::Elaborating(Elaborating {
-                discovered_channels,
+                channels,
                 mut elaboration,
                 handle,
                 incoming,
@@ -65,13 +95,41 @@ impl ChannelDiscovery {
 
                 if handle.is_finished() {
                     ChannelDiscoveryState::Elaborated(Elaborated {
-                        discovered_channels,
+                        channels,
                         elaboration,
                     })
                 } else {
                     ChannelDiscoveryState::Elaborating(Elaborating {
-                        discovered_channels,
+                        channels,
                         elaboration,
+
+                        handle,
+                        incoming,
+                    })
+                }
+            }
+            ChannelDiscoveryState::FindingUploads(FindingUploads {
+                channels,
+                elaboration,
+                mut uploads,
+                handle,
+                incoming,
+            }) => {
+                while let Ok((expected, metadata)) = incoming.try_recv() {
+                    uploads.insert(expected, metadata);
+                }
+
+                if handle.is_finished() {
+                    ChannelDiscoveryState::FoundUploads(FoundUploads {
+                        channels,
+                        elaboration,
+                        uploads,
+                    })
+                } else {
+                    ChannelDiscoveryState::FindingUploads(FindingUploads {
+                        channels,
+                        elaboration,
+                        uploads,
 
                         handle,
                         incoming,
@@ -103,7 +161,7 @@ impl Idle {
         });
 
         discovery.state = ChannelDiscoveryState::Discovering(Discovering {
-            discovered_channels: HashMap::new(),
+            channels: HashMap::new(),
             total_channel_count: None,
 
             incoming: rx,
@@ -113,28 +171,28 @@ impl Idle {
 }
 
 pub struct Discovering {
-    pub discovered_channels: HashMap<String, ChannelMetadata>,
+    pub channels: HashMap<ChannelId, ChannelMetadata>,
     pub total_channel_count: Option<i32>,
 
     handle: JoinHandle<()>,
-    incoming: Receiver<(i32, String, ChannelMetadata)>,
+    incoming: Receiver<(i32, ChannelId, ChannelMetadata)>,
 }
 
 pub struct Discovered {
-    pub discovered_channels: HashMap<String, ChannelMetadata>,
+    pub channels: HashMap<ChannelId, ChannelMetadata>,
 }
 impl Discovered {
     pub fn elaborate(&mut self, discovery: &mut ChannelDiscovery, access_token: AccessToken) {
         let (tx, rx) = std::sync::mpsc::channel();
         let context = discovery.context.clone();
-        let channel_ids = self.discovered_channels.keys().cloned().collect::<Vec<_>>();
+        let channel_ids = self.channels.keys().cloned().collect::<Vec<_>>();
 
         let handle = std::thread::spawn(|| {
             elaborate_all_channels(channel_ids, access_token, tx, context);
         });
 
         discovery.state = ChannelDiscoveryState::Elaborating(Elaborating {
-            discovered_channels: std::mem::take(&mut self.discovered_channels),
+            channels: std::mem::take(&mut self.channels),
             elaboration: HashMap::new(),
 
             incoming: rx,
@@ -144,16 +202,52 @@ impl Discovered {
 }
 
 pub struct Elaborating {
-    pub discovered_channels: HashMap<String, ChannelMetadata>,
-    pub elaboration: HashMap<String, String>,
+    pub channels: HashMap<ChannelId, ChannelMetadata>,
+    pub elaboration: HashMap<ChannelId, PlaylistId>,
 
     handle: JoinHandle<()>,
-    incoming: Receiver<(String, String)>,
+    incoming: Receiver<(ChannelId, PlaylistId)>,
 }
 
 pub struct Elaborated {
-    pub discovered_channels: HashMap<String, ChannelMetadata>,
-    pub elaboration: HashMap<String, String>,
+    pub channels: HashMap<ChannelId, ChannelMetadata>,
+    pub elaboration: HashMap<ChannelId, PlaylistId>,
+}
+
+impl Elaborated {
+    pub fn find_uploads(&mut self, discovery: &mut ChannelDiscovery, access_token: AccessToken) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let context = discovery.context.clone();
+        let playlist_ids = self.elaboration.clone();
+
+        let handle = std::thread::spawn(|| {
+            find_recent_uploads(playlist_ids, access_token, tx, context);
+        });
+
+        discovery.state = ChannelDiscoveryState::FindingUploads(FindingUploads {
+            channels: std::mem::take(&mut self.channels),
+            elaboration: std::mem::take(&mut self.elaboration),
+            uploads: HashMap::new(),
+
+            incoming: rx,
+            handle,
+        });
+    }
+}
+
+pub struct FindingUploads {
+    pub channels: HashMap<ChannelId, ChannelMetadata>,
+    pub elaboration: HashMap<ChannelId, PlaylistId>,
+    pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
+
+    handle: JoinHandle<()>,
+    incoming: Receiver<(ChannelId, Vec<VideoMetadata>)>,
+}
+
+pub struct FoundUploads {
+    pub channels: HashMap<ChannelId, ChannelMetadata>,
+    pub elaboration: HashMap<ChannelId, PlaylistId>,
+    pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
 }
 
 pub enum ChannelDiscoveryState {
@@ -162,6 +256,8 @@ pub enum ChannelDiscoveryState {
     Discovered(Discovered),
     Elaborating(Elaborating),
     Elaborated(Elaborated),
+    FindingUploads(FindingUploads),
+    FoundUploads(FoundUploads),
 }
 
 impl Default for ChannelDiscoveryState {
@@ -170,16 +266,10 @@ impl Default for ChannelDiscoveryState {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
-pub struct ChannelMetadata {
-    pub name: String,
-    pub profile_picture: String,
-}
-
 // TODO: etag and caching
 fn get_all_channels(
     token: AccessToken,
-    channel: Sender<(i32, String, ChannelMetadata)>,
+    channel: Sender<(i32, ChannelId, ChannelMetadata)>,
     context: Context,
 ) {
     let url = "https://www.googleapis.com/youtube/v3/subscriptions?part=snippet,contentDetails&mine=true&maxResults=50";
@@ -213,7 +303,7 @@ fn get_all_channels(
 
             debug_assert_eq!(resource.kind.as_deref(), Some("youtube#channel"));
 
-            let channel_id = resource.channel_id.unwrap();
+            let channel_id = ChannelId::new(resource.channel_id.unwrap());
             let channel_name = snippet.title.unwrap();
             let channel_thumbnail = {
                 let thumbnail = snippet.thumbnails.unwrap();
@@ -251,15 +341,23 @@ fn get_all_channels(
 
 // Playlists are always -> channel_id.replacen("UC", "UU", 1);
 fn elaborate_all_channels(
-    channel_ids: Vec<String>,
+    channel_ids: Vec<ChannelId>,
     token: AccessToken,
-    channel: Sender<(String, String)>,
+    channel: Sender<(ChannelId, PlaylistId)>,
     context: Context,
 ) {
     for chunk in channel_ids.chunks(50) {
         let url =
             "https://www.googleapis.com/youtube/v3/channels?part=id,contentDetails&maxResults=50";
-        let url = format!("{url}&id={}", chunk.join(","));
+        let url = format!(
+            "{url}&id={}",
+            chunk
+                .iter()
+                .cloned()
+                .map(ChannelId::into_inner)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
 
         let json = ureq::get(url.as_ref())
             .set("Authorization", &format!("Bearer {}", token.secret()))
@@ -273,17 +371,77 @@ fn elaborate_all_channels(
         for item in items {
             channel
                 .send((
-                    item.id.unwrap(),
-                    item.content_details
-                        .unwrap()
-                        .related_playlists
-                        .unwrap()
-                        .uploads
-                        .unwrap(),
+                    ChannelId::new(item.id.unwrap()),
+                    PlaylistId::new(
+                        item.content_details
+                            .unwrap()
+                            .related_playlists
+                            .unwrap()
+                            .uploads
+                            .unwrap(),
+                    ),
                 ))
                 .unwrap();
         }
         tracing::info!("chunk");
+        context.request_repaint();
+    }
+}
+
+fn find_recent_uploads(
+    playlist_ids: HashMap<ChannelId, PlaylistId>,
+    token: AccessToken,
+    channel: Sender<(ChannelId, Vec<VideoMetadata>)>,
+    context: Context,
+) {
+    for (channel_id, playlist_id) in playlist_ids {
+        let url = "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails&maxResults=50";
+        let url = format!("{url}&playlistId={playlist_id}");
+
+        let json = match ureq::get(url.as_ref())
+            .set("Authorization", &format!("Bearer {}", token.secret()))
+            .call()
+        {
+            Ok(response) => response.into_json::<PlaylistItemListResponse>().unwrap(),
+            Err(ureq::Error::Status(404, _)) => continue,
+            Err(error) => {
+                panic!("{}", error)
+            }
+        };
+
+        let items = json.items.unwrap();
+
+        let videos = items
+            .into_iter()
+            .map(|item| {
+                let snippet = item.snippet.unwrap();
+                let content_details = item.content_details.unwrap();
+
+                let position = snippet.position.unwrap();
+                let title = snippet.title.unwrap();
+                let thumbnail = snippet.thumbnails.unwrap().default.unwrap();
+
+                let video_id = VideoId::new(content_details.video_id.unwrap());
+                let published_at = Timestamp::from_millisecond(
+                    content_details
+                        .video_published_at
+                        .unwrap()
+                        .timestamp_millis(),
+                )
+                .unwrap();
+
+                VideoMetadata {
+                    id: video_id,
+                    title,
+                    thumbnail: thumbnail.url.unwrap(),
+                    published_at,
+                    position,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        tracing::info!(%channel_id, "channel");
+        channel.send((channel_id, videos)).unwrap();
         context.request_repaint();
     }
 }

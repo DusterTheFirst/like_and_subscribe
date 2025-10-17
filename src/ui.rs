@@ -1,12 +1,12 @@
 use eframe::egui::{
-    CentralPanel, ProgressBar,
+    CentralPanel, ProgressBar, ScrollArea,
     ahash::{HashMap, HashMapExt},
 };
 use egui_extras::{Column, TableBuilder};
 use jiff::tz::TimeZone;
 
 use crate::{
-    api::channels::{ChannelDiscovery, ChannelDiscoveryState, ChannelMetadata},
+    api::channels::{ChannelDiscovery, ChannelDiscoveryState, ChannelId, ChannelMetadata},
     cache::CacheProcess,
     oauth::{AuthorizationState, Authorize as _, OAuthManager, Refresh as _},
 };
@@ -16,7 +16,8 @@ pub struct AppUi {
 
     channel_discovery: ChannelDiscovery,
 
-    table_cache: CacheProcess<HashMap<String, ChannelMetadata>, Vec<(String, ChannelMetadata)>>,
+    table_cache:
+        CacheProcess<HashMap<ChannelId, ChannelMetadata>, Vec<(ChannelId, ChannelMetadata)>>,
 }
 
 impl AppUi {
@@ -91,22 +92,21 @@ impl eframe::App for AppUi {
 
             ui.separator();
 
-            let (channels, playlist) =
+            let (channels, playlist, videos) =
                 self.channel_discovery
                     .observe_state(|channel_discovery, state| match state {
                         ChannelDiscoveryState::Idle(idle) => {
                             if ui.button("Discover Channels").clicked() {
                                 idle.start(channel_discovery, access_token);
                             };
-                            (HashMap::new(), HashMap::new())
+                            (HashMap::new(), HashMap::new(), HashMap::new())
                         }
                         ChannelDiscoveryState::Discovering(discovering) => {
                             match discovering.total_channel_count {
                                 Some(total) => {
                                     ui.add(
                                         ProgressBar::new(
-                                            (discovering.discovered_channels.len() as f32)
-                                                / (total as f32),
+                                            (discovering.channels.len() as f32) / (total as f32),
                                         )
                                         .show_percentage(),
                                     );
@@ -115,36 +115,63 @@ impl eframe::App for AppUi {
                                     ui.add(ProgressBar::new(0.0));
                                 }
                             }
-                            (discovering.discovered_channels.clone(), HashMap::new())
+                            (discovering.channels.clone(), HashMap::new(), HashMap::new())
                         }
                         ChannelDiscoveryState::Discovered(discovered) => {
                             if ui.button("Elaborate Channels").clicked() {
                                 discovered.elaborate(channel_discovery, access_token);
                             }
 
-                            (discovered.discovered_channels.clone(), HashMap::new())
+                            (discovered.channels.clone(), HashMap::new(), HashMap::new())
                         }
                         ChannelDiscoveryState::Elaborating(elaborating) => {
                             ui.add(
                                 ProgressBar::new(
                                     (elaborating.elaboration.len() as f32)
-                                        / (elaborating.discovered_channels.len() as f32),
+                                        / (elaborating.channels.len() as f32),
                                 )
                                 .show_percentage(),
                             );
 
                             (
-                                elaborating.discovered_channels.clone(),
+                                elaborating.channels.clone(),
                                 elaborating.elaboration.clone(),
+                                HashMap::new(),
                             )
                         }
                         ChannelDiscoveryState::Elaborated(elaborated) => {
-                            ui.button("Find new uploads");
+                            if ui.button("Find new uploads").clicked() {
+                                elaborated.find_uploads(channel_discovery, access_token);
+                            }
+
+                            (
+                                elaborated.channels.clone(),
+                                elaborated.elaboration.clone(),
+                                HashMap::new(),
+                            )
+                        }
+                        ChannelDiscoveryState::FindingUploads(finding_uploads) => {
+                            ui.add(
+                                ProgressBar::new(
+                                    (finding_uploads.uploads.len() as f32)
+                                        / (finding_uploads.channels.len() as f32),
+                                )
+                                .show_percentage(),
+                            );
+
+                            (
+                                finding_uploads.channels.clone(),
+                                finding_uploads.elaboration.clone(),
+                                finding_uploads.uploads.clone(),
+                            )
+                        }
+                        ChannelDiscoveryState::FoundUploads(found_uploads) => {
                             ui.button("Add new uploads to playlist");
 
                             (
-                                elaborated.discovered_channels.clone(),
-                                elaborated.elaboration.clone(),
+                                found_uploads.channels.clone(),
+                                found_uploads.elaboration.clone(),
+                                found_uploads.uploads.clone(),
                             )
                         }
                     });
@@ -166,6 +193,7 @@ impl eframe::App for AppUi {
                 .column(Column::exact(150.0))
                 .column(Column::exact(150.0))
                 .column(Column::exact(200.0))
+                .column(Column::remainder())
                 .header(20.0, |mut row| {
                     row.col(|ui| {
                         ui.heading("Channel Id");
@@ -179,9 +207,12 @@ impl eframe::App for AppUi {
                     row.col(|ui| {
                         ui.heading("Channel Playlist");
                     });
+                    row.col(|ui| {
+                        ui.heading("Channel Videos");
+                    });
                 })
                 .body(|body| {
-                    body.rows(40.0, rows.len(), |mut row| {
+                    body.rows(60.0, rows.len(), |mut row| {
                         let (
                             channel_id,
                             ChannelMetadata {
@@ -192,7 +223,7 @@ impl eframe::App for AppUi {
                         let channel_playlist = playlist.get(channel_id);
 
                         row.col(|ui| {
-                            ui.monospace(channel_id);
+                            ui.monospace(channel_id.to_string());
                         });
                         row.col(|ui| {
                             ui.label(name);
@@ -202,8 +233,24 @@ impl eframe::App for AppUi {
                         });
                         row.col(|ui| {
                             if let Some(playlist) = channel_playlist {
-                                ui.monospace(playlist);
+                                ui.monospace(playlist.to_string());
                             }
+                        });
+                        row.col(|ui| {
+                            ScrollArea::horizontal().show(ui, |ui| {
+                                let videos = videos
+                                    .get(channel_id)
+                                    .map(|v| v.as_slice())
+                                    .unwrap_or_default();
+
+                                ui.horizontal(|ui| for video in videos {
+                                    ui.label(&video.title);
+                                    ui.label(video.position.to_string());
+                                    ui.label(video.published_at.to_zoned(TimeZone::system()).strftime("%A, %B %d, %Y at %H:%M%P %Q").to_string());
+                                    ui.image(&video.thumbnail);
+                                    ui.separator();
+                                });
+                            });
                         });
                     });
                 });
