@@ -11,6 +11,7 @@ mod api;
 mod database;
 mod oauth;
 mod ui;
+mod cache;
 
 #[derive(Envconfig)]
 pub struct Config {

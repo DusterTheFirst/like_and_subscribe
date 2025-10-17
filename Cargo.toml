@@ -21,4 +21,4 @@ ehttp              = "0.5.0"
 tiny_http          = "0.12.0"
 egui_extras        = { version = "0.33.0", features = ["all_loaders"] }
 ureq               = { version = "2", features = ["json"] }
-image = { version = "0.25", features = ["jpeg"] }
+image              = { version = "0.25", features = ["jpeg"] }

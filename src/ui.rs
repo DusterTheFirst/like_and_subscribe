@@ -1,9 +1,13 @@
-use eframe::egui::{CentralPanel, ProgressBar, ahash::HashMap};
-use egui_extras::{Column, Table, TableBuilder};
+use eframe::egui::{
+    CentralPanel, ProgressBar,
+    ahash::{HashMap, HashMapExt},
+};
+use egui_extras::{Column, TableBuilder};
 use jiff::tz::TimeZone;
 
 use crate::{
     api::channels::{ChannelDiscovery, ChannelDiscoveryState, ChannelMetadata},
+    cache::CacheProcess,
     oauth::{AuthorizationState, Authorize as _, OAuthManager, Refresh as _},
 };
 
@@ -11,6 +15,8 @@ pub struct AppUi {
     auth: OAuthManager,
 
     channel_discovery: ChannelDiscovery,
+
+    table_cache: CacheProcess<HashMap<String, ChannelMetadata>, Vec<(String, ChannelMetadata)>>,
 }
 
 impl AppUi {
@@ -18,6 +24,8 @@ impl AppUi {
         AppUi {
             auth,
             channel_discovery,
+
+            table_cache: Default::default(),
         }
     }
 }
@@ -83,50 +91,81 @@ impl eframe::App for AppUi {
 
             ui.separator();
 
-            ui.button("Find new uploads");
-            ui.button("Add new uploads to playlist");
+            let (channels, playlist) =
+                self.channel_discovery
+                    .observe_state(|channel_discovery, state| match state {
+                        ChannelDiscoveryState::Idle(idle) => {
+                            if ui.button("Discover Channels").clicked() {
+                                idle.start(channel_discovery, access_token);
+                            };
+                            (HashMap::new(), HashMap::new())
+                        }
+                        ChannelDiscoveryState::Discovering(discovering) => {
+                            match discovering.total_channel_count {
+                                Some(total) => {
+                                    ui.add(
+                                        ProgressBar::new(
+                                            (discovering.discovered_channels.len() as f32)
+                                                / (total as f32),
+                                        )
+                                        .show_percentage(),
+                                    );
+                                }
+                                None => {
+                                    ui.add(ProgressBar::new(0.0));
+                                }
+                            }
+                            (discovering.discovered_channels.clone(), HashMap::new())
+                        }
+                        ChannelDiscoveryState::Discovered(discovered) => {
+                            if ui.button("Elaborate Channels").clicked() {
+                                discovered.elaborate(channel_discovery, access_token);
+                            }
 
-            let channels = match self.channel_discovery.state() {
-                ChannelDiscoveryState::Idle(mut idle) => {
-                    if ui.button("Discover Channels").clicked() {
-                        idle.start(access_token);
-                    };
-                    &HashMap::default()
-                }
-                ChannelDiscoveryState::Discovering {
-                    discovered_channels,
-                    total_channel_count,
-                } => {
-                    match total_channel_count {
-                        Some(total) => {
+                            (discovered.discovered_channels.clone(), HashMap::new())
+                        }
+                        ChannelDiscoveryState::Elaborating(elaborating) => {
                             ui.add(
                                 ProgressBar::new(
-                                    (discovered_channels.len() as f32) / (total as f32),
+                                    (elaborating.elaboration.len() as f32)
+                                        / (elaborating.discovered_channels.len() as f32),
                                 )
                                 .show_percentage(),
                             );
-                        }
-                        None => {
-                            ui.add(ProgressBar::new(0.0));
-                        }
-                    }
-                    discovered_channels
-                }
-                ChannelDiscoveryState::Complete {
-                    discovered_channels,
-                } => discovered_channels,
-            };
 
-            let mut rows: Vec<_> = channels.iter().collect();
-            // FIXME: memoize
-            rows.sort_unstable_by_key(|(k, m)| &m.name);
+                            (
+                                elaborating.discovered_channels.clone(),
+                                elaborating.elaboration.clone(),
+                            )
+                        }
+                        ChannelDiscoveryState::Elaborated(elaborated) => {
+                            ui.button("Find new uploads");
+                            ui.button("Add new uploads to playlist");
+
+                            (
+                                elaborated.discovered_channels.clone(),
+                                elaborated.elaboration.clone(),
+                            )
+                        }
+                    });
+
+            let rows = self.table_cache.process(channels, |channels| {
+                tracing::debug!("sort");
+                let mut rows = channels
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<Vec<_>>();
+                rows.sort_unstable_by_key(|(k, m)| m.name.clone());
+                rows
+            });
 
             // TODO: calculate quota?
 
             TableBuilder::new(ui)
+                .column(Column::exact(200.0))
                 .column(Column::exact(150.0))
-                .column(Column::exact(150.0).resizable(true))
-                .column(Column::remainder())
+                .column(Column::exact(150.0))
+                .column(Column::exact(200.0))
                 .header(20.0, |mut row| {
                     row.col(|ui| {
                         ui.heading("Channel Id");
@@ -137,6 +176,9 @@ impl eframe::App for AppUi {
                     row.col(|ui| {
                         ui.heading("Channel Profile");
                     });
+                    row.col(|ui| {
+                        ui.heading("Channel Playlist");
+                    });
                 })
                 .body(|body| {
                     body.rows(40.0, rows.len(), |mut row| {
@@ -146,7 +188,8 @@ impl eframe::App for AppUi {
                                 name,
                                 profile_picture,
                             },
-                        ) = rows[row.index()];
+                        ) = &rows[row.index()];
+                        let channel_playlist = playlist.get(channel_id);
 
                         row.col(|ui| {
                             ui.monospace(channel_id);
@@ -156,6 +199,11 @@ impl eframe::App for AppUi {
                         });
                         row.col(|ui| {
                             ui.image(profile_picture);
+                        });
+                        row.col(|ui| {
+                            if let Some(playlist) = channel_playlist {
+                                ui.monospace(playlist);
+                            }
                         });
                     });
                 });
