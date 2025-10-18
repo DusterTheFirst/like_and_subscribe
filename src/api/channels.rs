@@ -4,15 +4,19 @@ use std::{
     thread::JoinHandle,
 };
 
+use dialoguer::Input;
 use eframe::egui::{
     Context,
-    ahash::{HashMap, HashMapExt},
+    ahash::{HashMap, HashMapExt, HashSet},
 };
 use google_youtube3::api::{
     ChannelListResponse, PlaylistItemListResponse, SubscriptionListResponse,
 };
 use jiff::Timestamp;
 use oauth2::{AccessToken, ureq};
+use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+
+use crate::database::Database;
 
 #[nutype::nutype(derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Display))]
 pub struct ChannelId(String);
@@ -43,13 +47,31 @@ pub struct VideoMetadata {
 
 pub struct ChannelDiscovery {
     context: Context,
+    database: Database,
+
     state: ChannelDiscoveryState,
+
+    pub last_seen_video: Timestamp,
 }
 
 impl ChannelDiscovery {
-    pub fn new(context: Context) -> Self {
+    pub fn new(database: Database, context: Context) -> Self {
         Self {
+            last_seen_video: database.update_date().get().unwrap_or_else(|| {
+                loop {
+                    match Input::<Timestamp>::new()
+                        .with_prompt("Timestamp of last seen video (YYYY-MM-DDTHH:MM:SSZ)?")
+                        .interact_text()
+                    {
+                        Ok(t) => return t,
+                        Err(error) => tracing::warn!(%error, "Invalid date"),
+                    }
+                }
+            }),
+
             context,
+            database,
+
             state: ChannelDiscoveryState::Idle(Idle {}),
         }
     }
@@ -113,14 +135,11 @@ impl ChannelDiscovery {
                 elaboration,
                 mut uploads,
 
-                mut current_channel,
-
                 handle,
                 incoming,
             }) => {
                 while let Ok((channel, metadata)) = incoming.try_recv() {
                     uploads.insert(channel.clone(), metadata);
-                    current_channel = Some(channel);
                 }
 
                 if handle.is_finished() {
@@ -134,8 +153,6 @@ impl ChannelDiscovery {
                         channels,
                         elaboration,
                         uploads,
-
-                        current_channel,
 
                         handle,
                         incoming,
@@ -219,7 +236,6 @@ pub struct Elaborated {
     pub channels: HashMap<ChannelId, ChannelMetadata>,
     pub elaboration: HashMap<ChannelId, PlaylistId>,
 }
-
 impl Elaborated {
     pub fn find_uploads(&mut self, discovery: &mut ChannelDiscovery, access_token: AccessToken) {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -245,8 +261,6 @@ impl Elaborated {
             elaboration: std::mem::take(&mut self.elaboration),
             uploads: HashMap::new(),
 
-            current_channel: None,
-
             incoming: rx,
             handle,
         });
@@ -258,8 +272,6 @@ pub struct FindingUploads {
     pub elaboration: HashMap<ChannelId, PlaylistId>,
     pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
 
-    pub current_channel: Option<ChannelId>,
-
     handle: JoinHandle<()>,
     incoming: Receiver<(ChannelId, Vec<VideoMetadata>)>,
 }
@@ -269,6 +281,35 @@ pub struct FoundUploads {
     pub elaboration: HashMap<ChannelId, PlaylistId>,
     pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
 }
+impl FoundUploads {
+    pub fn filter(&mut self, discovery: &mut ChannelDiscovery, timestamp: Timestamp) {
+        discovery.state = ChannelDiscoveryState::FilteredByDate(FilteredByDate {
+            filtered_videos: self.uploads.iter().flat_map(|(_, videos)| {
+                videos.iter().filter_map(|video| {
+                    if video.published_at > timestamp {
+                        Some(video.id.clone())
+                    } else {
+                        None
+                    }
+                })
+            }).collect(),
+
+            channels: std::mem::take(&mut self.channels),
+            elaboration: std::mem::take(&mut self.elaboration),
+            uploads: std::mem::take(&mut self.uploads),
+
+        });
+    }
+}
+
+pub struct FilteredByDate {
+    pub channels: HashMap<ChannelId, ChannelMetadata>,
+    pub elaboration: HashMap<ChannelId, PlaylistId>,
+    pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
+
+    pub filtered_videos: HashSet<VideoId>,
+}
+// pub struct FilteredByDateAndShorts {}
 
 pub enum ChannelDiscoveryState {
     Idle(Idle),
@@ -278,6 +319,9 @@ pub enum ChannelDiscoveryState {
     Elaborated(Elaborated),
     FindingUploads(FindingUploads),
     FoundUploads(FoundUploads),
+
+    FilteredByDate(FilteredByDate),
+    // FilteredByDateAndShorts(FilteredByDateAndShorts),
 }
 
 impl Default for ChannelDiscoveryState {
@@ -414,7 +458,7 @@ fn find_recent_uploads(
     channel: Sender<(ChannelId, Vec<VideoMetadata>)>,
     context: Context,
 ) {
-    for (channel_id, playlist_id) in playlist_ids {
+    playlist_ids.into_par_iter().for_each(|(channel_id, playlist_id)| {
         let url = "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails&maxResults=50";
         let url = format!("{url}&playlistId={playlist_id}");
 
@@ -423,7 +467,7 @@ fn find_recent_uploads(
             .call()
         {
             Ok(response) => response.into_json::<PlaylistItemListResponse>().unwrap(),
-            Err(ureq::Error::Status(404, _)) => continue,
+            Err(ureq::Error::Status(404, _)) => return,
             Err(error) => {
                 panic!("{}", error)
             }
@@ -463,5 +507,5 @@ fn find_recent_uploads(
         tracing::info!(%channel_id, "channel");
         channel.send((channel_id, videos)).unwrap();
         context.request_repaint();
-    }
+    });
 }

@@ -1,8 +1,8 @@
 use eframe::egui::{
-    self, CentralPanel, Grid, Image, ProgressBar, Rect, ScrollArea, TextStyle, UiBuilder, Vec2,
+    self, CentralPanel, Color32, Frame, Image, ProgressBar, Rect, ScrollArea, TextStyle, UiBuilder,
+    Vec2,
     ahash::{HashMap, HashMapExt},
 };
-use egui_extras::{Column, Size, StripBuilder, TableBuilder};
 use jiff::tz::TimeZone;
 
 use crate::{
@@ -92,103 +92,125 @@ impl eframe::App for AppUi {
 
             ui.separator();
 
-            let (channels, playlist, videos, focus_column) =
-                self.channel_discovery
-                    .observe_state(|channel_discovery, state| match state {
-                        ChannelDiscoveryState::Idle(idle) => {
-                            if ui.button("Discover Channels").clicked() {
-                                idle.start(channel_discovery, access_token);
-                            };
-                            (HashMap::new(), HashMap::new(), HashMap::new(), None)
-                        }
-                        ChannelDiscoveryState::Discovering(discovering) => {
-                            match discovering.total_channel_count {
-                                Some(total) => {
-                                    ui.add(
-                                        ProgressBar::new(
-                                            (discovering.channels.len() as f32) / (total as f32),
-                                        )
-                                        .show_percentage(),
-                                    );
-                                }
-                                None => {
-                                    ui.add(ProgressBar::new(0.0));
-                                }
+            let (channels, playlist, videos, filtered_videos) = self
+                .channel_discovery
+                .observe_state(|channel_discovery, state| match state {
+                    ChannelDiscoveryState::Idle(idle) => {
+                        if ui.button("Discover Channels").clicked() {
+                            idle.start(channel_discovery, access_token);
+                        };
+                        (HashMap::new(), HashMap::new(), HashMap::new(), None)
+                    }
+                    ChannelDiscoveryState::Discovering(discovering) => {
+                        match discovering.total_channel_count {
+                            Some(total) => {
+                                ui.add(
+                                    ProgressBar::new(
+                                        (discovering.channels.len() as f32) / (total as f32),
+                                    )
+                                    .show_percentage(),
+                                );
                             }
-                            (
-                                discovering.channels.clone(),
-                                HashMap::new(),
-                                HashMap::new(),
-                                None,
-                            )
-                        }
-                        ChannelDiscoveryState::Discovered(discovered) => {
-                            if ui.button("Elaborate Channels").clicked() {
-                                discovered.elaborate(channel_discovery, access_token);
+                            None => {
+                                ui.add(ProgressBar::new(0.0));
                             }
-
-                            (
-                                discovered.channels.clone(),
-                                HashMap::new(),
-                                HashMap::new(),
-                                None,
-                            )
                         }
-                        ChannelDiscoveryState::Elaborating(elaborating) => {
-                            ui.add(
-                                ProgressBar::new(
-                                    (elaborating.elaboration.len() as f32)
-                                        / (elaborating.channels.len() as f32),
-                                )
-                                .show_percentage(),
-                            );
-
-                            (
-                                elaborating.channels.clone(),
-                                elaborating.elaboration.clone(),
-                                HashMap::new(),
-                                None,
-                            )
+                        (
+                            discovering.channels.clone(),
+                            HashMap::new(),
+                            HashMap::new(),
+                            None,
+                        )
+                    }
+                    ChannelDiscoveryState::Discovered(discovered) => {
+                        if ui.button("Elaborate Channels").clicked() {
+                            discovered.elaborate(channel_discovery, access_token);
                         }
-                        ChannelDiscoveryState::Elaborated(elaborated) => {
-                            if ui.button("Find new uploads").clicked() {
-                                elaborated.find_uploads(channel_discovery, access_token);
+
+                        (
+                            discovered.channels.clone(),
+                            HashMap::new(),
+                            HashMap::new(),
+                            None,
+                        )
+                    }
+                    ChannelDiscoveryState::Elaborating(elaborating) => {
+                        ui.add(
+                            ProgressBar::new(
+                                (elaborating.elaboration.len() as f32)
+                                    / (elaborating.channels.len() as f32),
+                            )
+                            .show_percentage(),
+                        );
+
+                        (
+                            elaborating.channels.clone(),
+                            elaborating.elaboration.clone(),
+                            HashMap::new(),
+                            None,
+                        )
+                    }
+                    ChannelDiscoveryState::Elaborated(elaborated) => {
+                        if ui.button("Find new uploads").clicked() {
+                            elaborated.find_uploads(channel_discovery, access_token);
+                        }
+
+                        (
+                            elaborated.channels.clone(),
+                            elaborated.elaboration.clone(),
+                            HashMap::new(),
+                            None,
+                        )
+                    }
+                    ChannelDiscoveryState::FindingUploads(finding_uploads) => {
+                        ui.add(
+                            ProgressBar::new(
+                                (finding_uploads.uploads.len() as f32)
+                                    / (finding_uploads.channels.len() as f32),
+                            )
+                            .show_percentage(),
+                        );
+
+                        (
+                            finding_uploads.channels.clone(),
+                            finding_uploads.elaboration.clone(),
+                            finding_uploads.uploads.clone(),
+                            None,
+                        )
+                    }
+                    ChannelDiscoveryState::FoundUploads(found_uploads) => {
+                        ui.horizontal(|ui| {
+                            ui.label("Filter: ");
+                            ui.monospace(channel_discovery.last_seen_video.to_string());
+
+                            if ui.button("Filter by date").clicked() {
+                                found_uploads
+                                    .filter(channel_discovery, channel_discovery.last_seen_video);
                             }
+                        });
 
-                            (
-                                elaborated.channels.clone(),
-                                elaborated.elaboration.clone(),
-                                HashMap::new(),
-                                None,
-                            )
-                        }
-                        ChannelDiscoveryState::FindingUploads(finding_uploads) => {
-                            ui.add(
-                                ProgressBar::new(
-                                    (finding_uploads.uploads.len() as f32)
-                                        / (finding_uploads.channels.len() as f32),
-                                )
-                                .show_percentage(),
-                            );
+                        (
+                            found_uploads.channels.clone(),
+                            found_uploads.elaboration.clone(),
+                            found_uploads.uploads.clone(),
+                            None,
+                        )
+                    }
+                    ChannelDiscoveryState::FilteredByDate(filtered) => {
+                        ui.horizontal(|ui: &mut egui::Ui| {
+                            ui.button("Filter by shorts");
+                        });
 
-                            (
-                                finding_uploads.channels.clone(),
-                                finding_uploads.elaboration.clone(),
-                                finding_uploads.uploads.clone(),
-                                finding_uploads.current_channel.clone(),
-                            )
-                        }
-                        ChannelDiscoveryState::FoundUploads(found_uploads) => {
-                            ui.button("Add new uploads to playlist");
+                        ui.button("Add new uploads to playlist");
 
-                            (
-                                found_uploads.channels.clone(),
-                                found_uploads.elaboration.clone(),
-                                found_uploads.uploads.clone(),
-                                None,
-                            )
-                        }
-                    });
+                        (
+                            filtered.channels.clone(),
+                            filtered.elaboration.clone(),
+                            filtered.uploads.clone(),
+                            Some(filtered.filtered_videos.clone()),
+                        )
+                    }
+                });
 
             let rows = self.table_cache.process(channels, |channels| {
                 tracing::debug!("sort");
@@ -203,84 +225,84 @@ impl eframe::App for AppUi {
             // TODO: calculate quota?
 
             ScrollArea::both().show(ui, |ui| {
-                ui.horizontal_top(|ui| {
-                    show_columns(
-                        ScrollArea::horizontal(),
-                        ui,
-                        300.0,
-                        rows.len(),
-                        |ui, range| {
-                            for (i, (channel_id, channel_metadata)) in
-                                rows[range.clone()].iter().enumerate()
-                            {
-                                let i = i + range.start;
+                show_columns(
+                    ScrollArea::horizontal(),
+                    ui,
+                    300.0,
+                    rows.len(),
+                    |ui, range| {
+                        for (i, (channel_id, channel_metadata)) in
+                            rows[range.clone()].iter().enumerate()
+                        {
+                            let i = i + range.start;
 
-                                ui.vertical(|ui| {
-                                    ui.set_width(300.0);
-                                    ui.vertical_centered_justified(|ui| {
-                                        ui.label(format!("#{i}"));
-                                    });
-                                    ui.separator();
+                            ui.vertical(|ui| {
+                                ui.set_width(300.0);
+                                ui.vertical_centered_justified(|ui| {
+                                    ui.label(format!("#{i}"));
+                                });
+                                ui.separator();
 
-                                    let channel_playlist = playlist.get(channel_id);
+                                let channel_playlist = playlist.get(channel_id);
 
-                                    ui.horizontal(|ui| {
-                                        ui.add_sized(
-                                            Vec2::ONE
-                                                * ui.text_style_height(&TextStyle::Monospace)
-                                                * 3.0,
-                                            Image::new(&channel_metadata.profile_picture),
-                                        );
+                                ui.horizontal(|ui| {
+                                    ui.add_sized(
+                                        Vec2::ONE
+                                            * ui.text_style_height(&TextStyle::Monospace)
+                                            * 3.0,
+                                        Image::new(&channel_metadata.profile_picture),
+                                    );
 
-                                        ui.vertical(|ui| {
-                                            ui.label(&channel_metadata.name);
-                                            ui.monospace(channel_id.to_string());
-                                            if let Some(playlist) = channel_playlist {
-                                                ui.monospace(playlist.to_string());
-                                            }
-                                        })
-                                    });
-
-                                    ui.separator();
-
-                                    let videos = videos
-                                        .get(channel_id)
-                                        .map(|v| v.as_slice())
-                                        .unwrap_or_default();
-
-                                    ui.label(format!("{} videos loaded", videos.len()));
-
-                                    ui.separator();
-
-                                    for video in videos {
-                                        ui.horizontal(|ui| {
-                                            ui.label(format!("#{}", video.position));
-
-                                            // ui.add_sized(
-                                            //     Vec2::ONE
-                                            //         * ui.text_style_height(&TextStyle::Monospace)
-                                            //         * 3.0,
-                                            //     Image::new(&video.thumbnail),
-                                            // );
-
-                                            ui.vertical(|ui| {
-                                                ui.label(&video.title);
-                                                ui.label(video.published_at.to_string());
-                                            })
-                                        });
-                                    }
+                                    ui.vertical(|ui| {
+                                        ui.label(&channel_metadata.name);
+                                        ui.monospace(channel_id.to_string());
+                                        if let Some(playlist) = channel_playlist {
+                                            ui.monospace(playlist.to_string());
+                                        }
+                                    })
                                 });
 
-                                let response = ui.separator();
-                                if let Some(focus_channel) = &focus_column
-                                    && channel_id == focus_channel
-                                {
-                                    response.scroll_to_me(None);
+                                ui.separator();
+
+                                let videos = videos
+                                    .get(channel_id)
+                                    .map(|v| v.as_slice())
+                                    .unwrap_or_default();
+
+                                ui.label(format!("{} videos loaded", videos.len()));
+
+                                ui.separator();
+
+                                for video in videos {
+                                    ui.horizontal(|ui| {
+                                        if let Some(filtered_videos) = &filtered_videos
+                                            && filtered_videos.contains(&video.id)
+                                        {
+                                            ui.visuals_mut().override_text_color =
+                                                Some(Color32::GREEN);
+                                        }
+
+                                        ui.label(format!("#{}", video.position));
+
+                                        // ui.add_sized(
+                                        //     Vec2::ONE
+                                        //         * ui.text_style_height(&TextStyle::Monospace)
+                                        //         * 3.0,
+                                        //     Image::new(&video.thumbnail),
+                                        // );
+
+                                        ui.vertical(|ui| {
+                                            ui.label(&video.title);
+                                            ui.label(video.published_at.to_string());
+                                        })
+                                    });
                                 }
-                            }
-                        },
-                    );
-                });
+                            });
+
+                            ui.separator();
+                        }
+                    },
+                );
             });
         });
     }

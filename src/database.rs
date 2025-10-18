@@ -76,24 +76,24 @@ pub struct UpdateDate<'a> {
     database: &'a Database,
 }
 impl<'a> UpdateDate<'a> {
-    const TABLE: TableDefinition<'static, String, i64> = TableDefinition::new("last_seen_video");
+    const TABLE: TableDefinition<'static, (), i64> = TableDefinition::new("last_seen_video");
 
-    pub fn set(&self, channel_id: String, timestamp: Timestamp) {
+    pub fn set(&self, timestamp: Timestamp) {
         let write_txn = self.database.connection.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(Self::TABLE).unwrap();
             table
-                .insert(channel_id, timestamp.as_millisecond())
+                .insert((), timestamp.as_millisecond())
                 .unwrap();
         }
         write_txn.commit().unwrap();
     }
 
-    pub fn get(&self, channel_id: String) -> Option<Timestamp> {
+    pub fn get(&self) -> Option<Timestamp> {
         let read_txn = self.database.connection.begin_read().unwrap();
         let table = read_txn.open_table(Self::TABLE).unwrap();
 
-        table.get(channel_id).unwrap().map(|value| {
+        table.get(()).unwrap().map(|value| {
             Timestamp::from_millisecond(value.value()).expect("stored timestamp should be valid")
         })
     }

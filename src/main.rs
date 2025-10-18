@@ -63,7 +63,7 @@ fn main() -> eframe::Result<()> {
                     database.clone(),
                     cc.egui_ctx.clone(),
                 ),
-                ChannelDiscovery::new(cc.egui_ctx.clone()),
+                ChannelDiscovery::new(database.clone(), cc.egui_ctx.clone()),
             )))
         }),
     )
