@@ -1,8 +1,8 @@
 use eframe::egui::{
-    CentralPanel, ProgressBar, ScrollArea,
+    self, CentralPanel, Grid, Image, ProgressBar, Rect, ScrollArea, TextStyle, UiBuilder, Vec2,
     ahash::{HashMap, HashMapExt},
 };
-use egui_extras::{Column, TableBuilder};
+use egui_extras::{Column, Size, StripBuilder, TableBuilder};
 use jiff::tz::TimeZone;
 
 use crate::{
@@ -92,14 +92,14 @@ impl eframe::App for AppUi {
 
             ui.separator();
 
-            let (channels, playlist, videos) =
+            let (channels, playlist, videos, focus_column) =
                 self.channel_discovery
                     .observe_state(|channel_discovery, state| match state {
                         ChannelDiscoveryState::Idle(idle) => {
                             if ui.button("Discover Channels").clicked() {
                                 idle.start(channel_discovery, access_token);
                             };
-                            (HashMap::new(), HashMap::new(), HashMap::new())
+                            (HashMap::new(), HashMap::new(), HashMap::new(), None)
                         }
                         ChannelDiscoveryState::Discovering(discovering) => {
                             match discovering.total_channel_count {
@@ -115,14 +115,24 @@ impl eframe::App for AppUi {
                                     ui.add(ProgressBar::new(0.0));
                                 }
                             }
-                            (discovering.channels.clone(), HashMap::new(), HashMap::new())
+                            (
+                                discovering.channels.clone(),
+                                HashMap::new(),
+                                HashMap::new(),
+                                None,
+                            )
                         }
                         ChannelDiscoveryState::Discovered(discovered) => {
                             if ui.button("Elaborate Channels").clicked() {
                                 discovered.elaborate(channel_discovery, access_token);
                             }
 
-                            (discovered.channels.clone(), HashMap::new(), HashMap::new())
+                            (
+                                discovered.channels.clone(),
+                                HashMap::new(),
+                                HashMap::new(),
+                                None,
+                            )
                         }
                         ChannelDiscoveryState::Elaborating(elaborating) => {
                             ui.add(
@@ -137,6 +147,7 @@ impl eframe::App for AppUi {
                                 elaborating.channels.clone(),
                                 elaborating.elaboration.clone(),
                                 HashMap::new(),
+                                None,
                             )
                         }
                         ChannelDiscoveryState::Elaborated(elaborated) => {
@@ -148,6 +159,7 @@ impl eframe::App for AppUi {
                                 elaborated.channels.clone(),
                                 elaborated.elaboration.clone(),
                                 HashMap::new(),
+                                None,
                             )
                         }
                         ChannelDiscoveryState::FindingUploads(finding_uploads) => {
@@ -163,6 +175,7 @@ impl eframe::App for AppUi {
                                 finding_uploads.channels.clone(),
                                 finding_uploads.elaboration.clone(),
                                 finding_uploads.uploads.clone(),
+                                finding_uploads.current_channel.clone(),
                             )
                         }
                         ChannelDiscoveryState::FoundUploads(found_uploads) => {
@@ -172,6 +185,7 @@ impl eframe::App for AppUi {
                                 found_uploads.channels.clone(),
                                 found_uploads.elaboration.clone(),
                                 found_uploads.uploads.clone(),
+                                None,
                             )
                         }
                     });
@@ -188,72 +202,123 @@ impl eframe::App for AppUi {
 
             // TODO: calculate quota?
 
-            TableBuilder::new(ui)
-                .column(Column::exact(200.0))
-                .column(Column::exact(150.0))
-                .column(Column::exact(150.0))
-                .column(Column::exact(200.0))
-                .column(Column::remainder())
-                .header(20.0, |mut row| {
-                    row.col(|ui| {
-                        ui.heading("Channel Id");
-                    });
-                    row.col(|ui| {
-                        ui.heading("Channel Name");
-                    });
-                    row.col(|ui| {
-                        ui.heading("Channel Profile");
-                    });
-                    row.col(|ui| {
-                        ui.heading("Channel Playlist");
-                    });
-                    row.col(|ui| {
-                        ui.heading("Channel Videos");
-                    });
-                })
-                .body(|body| {
-                    body.rows(60.0, rows.len(), |mut row| {
-                        let (
-                            channel_id,
-                            ChannelMetadata {
-                                name,
-                                profile_picture,
-                            },
-                        ) = &rows[row.index()];
-                        let channel_playlist = playlist.get(channel_id);
+            ScrollArea::both().show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    show_columns(
+                        ScrollArea::horizontal(),
+                        ui,
+                        300.0,
+                        rows.len(),
+                        |ui, range| {
+                            for (i, (channel_id, channel_metadata)) in
+                                rows[range.clone()].iter().enumerate()
+                            {
+                                let i = i + range.start;
 
-                        row.col(|ui| {
-                            ui.monospace(channel_id.to_string());
-                        });
-                        row.col(|ui| {
-                            ui.label(name);
-                        });
-                        row.col(|ui| {
-                            ui.image(profile_picture);
-                        });
-                        row.col(|ui| {
-                            if let Some(playlist) = channel_playlist {
-                                ui.monospace(playlist.to_string());
-                            }
-                        });
-                        row.col(|ui| {
-                            ScrollArea::horizontal().show(ui, |ui| {
-                                let videos = videos
-                                    .get(channel_id)
-                                    .map(|v| v.as_slice())
-                                    .unwrap_or_default();
-
-                                ui.horizontal(|ui| for video in videos {
-                                    ui.label(&video.title);
-                                    ui.label(video.position.to_string());
-                                    ui.label(video.published_at.to_zoned(TimeZone::system()).strftime("%A, %B %d, %Y at %H:%M%P %Q").to_string());
-                                    ui.image(&video.thumbnail);
+                                ui.vertical(|ui| {
+                                    ui.set_width(300.0);
+                                    ui.vertical_centered_justified(|ui| {
+                                        ui.label(format!("#{i}"));
+                                    });
                                     ui.separator();
+
+                                    let channel_playlist = playlist.get(channel_id);
+
+                                    ui.horizontal(|ui| {
+                                        ui.add_sized(
+                                            Vec2::ONE
+                                                * ui.text_style_height(&TextStyle::Monospace)
+                                                * 3.0,
+                                            Image::new(&channel_metadata.profile_picture),
+                                        );
+
+                                        ui.vertical(|ui| {
+                                            ui.label(&channel_metadata.name);
+                                            ui.monospace(channel_id.to_string());
+                                            if let Some(playlist) = channel_playlist {
+                                                ui.monospace(playlist.to_string());
+                                            }
+                                        })
+                                    });
+
+                                    ui.separator();
+
+                                    let videos = videos
+                                        .get(channel_id)
+                                        .map(|v| v.as_slice())
+                                        .unwrap_or_default();
+
+                                    ui.label(format!("{} videos loaded", videos.len()));
+
+                                    ui.separator();
+
+                                    for video in videos {
+                                        ui.horizontal(|ui| {
+                                            ui.label(format!("#{}", video.position));
+
+                                            // ui.add_sized(
+                                            //     Vec2::ONE
+                                            //         * ui.text_style_height(&TextStyle::Monospace)
+                                            //         * 3.0,
+                                            //     Image::new(&video.thumbnail),
+                                            // );
+
+                                            ui.vertical(|ui| {
+                                                ui.label(&video.title);
+                                                ui.label(video.published_at.to_string());
+                                            })
+                                        });
+                                    }
                                 });
-                            });
-                        });
-                    });
+
+                                let response = ui.separator();
+                                if let Some(focus_channel) = &focus_column
+                                    && channel_id == focus_channel
+                                {
+                                    response.scroll_to_me(None);
+                                }
+                            }
+                        },
+                    );
                 });
+            });
         });
     }
+}
+
+fn show_columns(
+    scroll_area: ScrollArea,
+    ui: &mut egui::Ui,
+    item_width_without_spacing: f32,
+    total_items: usize,
+    add_contents: impl FnOnce(&mut egui::Ui, std::ops::Range<usize>),
+) {
+    use egui::NumExt as _;
+
+    let spacing = ui.spacing().item_spacing;
+    let item_width_with_spacing = item_width_without_spacing + spacing.x;
+    scroll_area.show_viewport(ui, |ui, viewport| {
+        ui.set_width({
+            let total_items_f = total_items as f32;
+            let including_last_padding = item_width_with_spacing * total_items_f;
+            let width = including_last_padding - spacing.x;
+            width.at_least(0.0)
+        });
+
+        let min_col = (viewport.min.x / item_width_with_spacing).floor() as usize;
+        let max_col = (viewport.max.x / item_width_with_spacing).ceil() as usize + 1;
+        let max_col = max_col.at_most(total_items);
+
+        let x_min = ui.max_rect().left() + min_col as f32 * item_width_with_spacing;
+        let x_max = ui.max_rect().left() + max_col as f32 * item_width_with_spacing;
+
+        let rect = Rect::from_x_y_ranges(x_min..=x_max, ui.max_rect().y_range());
+
+        ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+            ui.skip_ahead_auto_ids(min_col);
+            ui.horizontal(|ui| {
+                add_contents(ui, min_col..max_col);
+            });
+        });
+    });
 }

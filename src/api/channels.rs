@@ -89,8 +89,8 @@ impl ChannelDiscovery {
                 handle,
                 incoming,
             }) => {
-                while let Ok((expected, metadata)) = incoming.try_recv() {
-                    elaboration.insert(expected, metadata);
+                while let Ok((channel, metadata)) = incoming.try_recv() {
+                    elaboration.insert(channel, metadata);
                 }
 
                 if handle.is_finished() {
@@ -112,11 +112,15 @@ impl ChannelDiscovery {
                 channels,
                 elaboration,
                 mut uploads,
+
+                mut current_channel,
+
                 handle,
                 incoming,
             }) => {
-                while let Ok((expected, metadata)) = incoming.try_recv() {
-                    uploads.insert(expected, metadata);
+                while let Ok((channel, metadata)) = incoming.try_recv() {
+                    uploads.insert(channel.clone(), metadata);
+                    current_channel = Some(channel);
                 }
 
                 if handle.is_finished() {
@@ -130,6 +134,8 @@ impl ChannelDiscovery {
                         channels,
                         elaboration,
                         uploads,
+
+                        current_channel,
 
                         handle,
                         incoming,
@@ -218,7 +224,17 @@ impl Elaborated {
     pub fn find_uploads(&mut self, discovery: &mut ChannelDiscovery, access_token: AccessToken) {
         let (tx, rx) = std::sync::mpsc::channel();
         let context = discovery.context.clone();
-        let playlist_ids = self.elaboration.clone();
+        let playlist_ids = {
+            let mut ids = self
+                .elaboration
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>();
+
+            ids.sort_unstable_by_key(|(c, _)| &self.channels.get(c).unwrap().name);
+
+            ids
+        };
 
         let handle = std::thread::spawn(|| {
             find_recent_uploads(playlist_ids, access_token, tx, context);
@@ -228,6 +244,8 @@ impl Elaborated {
             channels: std::mem::take(&mut self.channels),
             elaboration: std::mem::take(&mut self.elaboration),
             uploads: HashMap::new(),
+
+            current_channel: None,
 
             incoming: rx,
             handle,
@@ -239,6 +257,8 @@ pub struct FindingUploads {
     pub channels: HashMap<ChannelId, ChannelMetadata>,
     pub elaboration: HashMap<ChannelId, PlaylistId>,
     pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
+
+    pub current_channel: Option<ChannelId>,
 
     handle: JoinHandle<()>,
     incoming: Receiver<(ChannelId, Vec<VideoMetadata>)>,
@@ -389,7 +409,7 @@ fn elaborate_all_channels(
 }
 
 fn find_recent_uploads(
-    playlist_ids: HashMap<ChannelId, PlaylistId>,
+    playlist_ids: Vec<(ChannelId, PlaylistId)>,
     token: AccessToken,
     channel: Sender<(ChannelId, Vec<VideoMetadata>)>,
     context: Context,

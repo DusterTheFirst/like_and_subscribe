@@ -3,6 +3,9 @@ name    = "like_and_subscribe"
 version = "0.1.0"
 edition = "2024"
 
+[profile.dev.package."*"]
+opt-level = 3
+
 [dependencies]
 bstr               = "1.12.0"
 google-youtube3    = { version = "6.0.0", default-features = false }
@@ -22,4 +25,4 @@ tiny_http          = "0.12.0"
 egui_extras        = { version = "0.33.0", features = ["all_loaders"] }
 ureq               = { version = "2", features = ["json"] }
 image              = { version = "0.25", features = ["jpeg"] }
-nutype = "0.6.2"
+nutype             = "0.6.2"
