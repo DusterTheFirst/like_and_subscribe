@@ -5,13 +5,18 @@ use envconfig::Envconfig;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
-use crate::{discovery::ChannelDiscovery, database::Database, oauth::OAuthManager, ui::AppUi};
+use crate::{
+    database::Database,
+    discovery::{ChannelDiscovery, PlaylistId},
+    oauth::OAuthManager,
+    ui::AppUi,
+};
 
-mod discovery;
+mod cache;
 mod database;
+mod discovery;
 mod oauth;
 mod ui;
-mod cache;
 
 #[derive(Envconfig)]
 pub struct Config {
@@ -21,7 +26,7 @@ pub struct Config {
     pub google_client_secret: String,
 
     #[envconfig(from = "YOUTUBE_PLAYLIST_ID")]
-    pub youtube_playlist_id: String,
+    pub youtube_playlist_id: PlaylistId,
 
     #[envconfig(from = "DATABASE_URL")]
     pub database_url: OsString,
@@ -63,7 +68,11 @@ fn main() -> eframe::Result<()> {
                     database.clone(),
                     cc.egui_ctx.clone(),
                 ),
-                ChannelDiscovery::new(database.clone(), cc.egui_ctx.clone()),
+                ChannelDiscovery::new(
+                    database.clone(),
+                    config.youtube_playlist_id,
+                    cc.egui_ctx.clone(),
+                ),
             )))
         }),
     )

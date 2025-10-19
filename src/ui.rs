@@ -1,7 +1,6 @@
-use std::convert::identity;
-
 use eframe::egui::{
     self, CentralPanel, Color32, Image, ProgressBar, Rect, ScrollArea, TextStyle, UiBuilder, Vec2,
+    Vec2b,
     ahash::{HashMap, HashMapExt, HashSet, HashSetExt},
 };
 use jiff::tz::TimeZone;
@@ -37,7 +36,7 @@ impl AppUi {
 }
 
 impl eframe::App for AppUi {
-    fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         CentralPanel::default().show(ctx, |ui| {
             let access_token = match self.auth.get_state() {
                 AuthorizationState::AuthorizedExpired(unauth) => {
@@ -97,7 +96,7 @@ impl eframe::App for AppUi {
 
             ui.separator();
 
-            let (channels, videos, date_filtered_videos) =
+            let (channels, videos, playlist_items) =
                 self.channel_discovery
                     .observe_state(|channel_discovery, state| match state {
                         ChannelDiscoveryState::Idle(idle) => {
@@ -125,10 +124,12 @@ impl eframe::App for AppUi {
                         }
                         ChannelDiscoveryState::Discovered(discovered) => {
                             ui.horizontal(|ui| {
-                                ui.label(format!("Channels: {}", discovered.channels.len()));
-
-                                if ui.button("Find uploads").clicked() {
-                                    discovered.find_uploads(channel_discovery, access_token);
+                                if ui.button("Find uploads until date").clicked() {
+                                    discovered.find_uploads(
+                                        channel_discovery,
+                                        channel_discovery.last_seen_video,
+                                        access_token,
+                                    );
                                 }
                             });
 
@@ -151,24 +152,11 @@ impl eframe::App for AppUi {
                         }
                         ChannelDiscoveryState::FoundUploads(found_uploads) => {
                             ui.horizontal(|ui| {
-                                ui.label(format!("Channels: {}", found_uploads.channels.len()));
-                                ui.label(format!(
-                                    "Channels with uploads: {}",
-                                    found_uploads.uploads.len()
-                                ));
-                                ui.label(format!(
-                                    "Total videos: {}",
-                                    found_uploads.uploads.values().map(Vec::len).sum::<usize>()
-                                ));
+                                ui.checkbox(&mut self.show_only_new, "Show only new");
 
-                                ui.label("Filter: ");
-                                ui.monospace(channel_discovery.last_seen_video.to_string());
-
-                                if ui.button("Filter by date").clicked() {
-                                    found_uploads.filter(
-                                        channel_discovery,
-                                        channel_discovery.last_seen_video,
-                                    );
+                                if ui.button("Filter by playlist").clicked() {
+                                    found_uploads
+                                        .find_playlist_items(channel_discovery, access_token);
                                 }
                             });
 
@@ -178,34 +166,103 @@ impl eframe::App for AppUi {
                                 HashSet::new(),
                             )
                         }
-                        ChannelDiscoveryState::FilteredByDate(filtered) => {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("Channels: {}", filtered.channels.len()));
-                                ui.label(format!(
-                                    "Channels with uploads: {}",
-                                    filtered.uploads.len()
-                                ));
-                                ui.label(format!(
-                                    "Total videos: {}",
-                                    filtered.uploads.values().map(Vec::len).sum::<usize>()
-                                ));
-                                ui.label(format!(
-                                    "Total new videos: {}",
-                                    filtered.date_filtered_videos.len()
-                                ));
+                        ChannelDiscoveryState::FindingPlaylistItems(finding_playlist_items) => {
+                            match finding_playlist_items.total_playlist_items {
+                                Some(total) => {
+                                    let items = finding_playlist_items.playlist_items.len();
 
-                                if ui.button("Filter by shorts").clicked() {
-                                    // filtered.filter(channel_discovery, access_token);
+                                    ui.add(
+                                        ProgressBar::new((items as f32) / (total as f32))
+                                            .text(format!("{items}/{total}")),
+                                    );
+                                }
+                                None => {
+                                    ui.add(ProgressBar::new(0.0));
+                                }
+                            }
+
+                            (
+                                finding_playlist_items.channels.clone(),
+                                finding_playlist_items.uploads.clone(),
+                                finding_playlist_items.playlist_items.clone(),
+                            )
+                        }
+                        ChannelDiscoveryState::FoundPlaylistItems(found_playlist_items) => {
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut self.show_only_new, "Show only new");
+
+                                if ui.button("Add new to playlist").clicked() {
+                                    todo!()
                                 }
                             });
 
                             (
-                                filtered.channels.clone(),
-                                filtered.uploads.clone(),
-                                filtered.date_filtered_videos.clone(),
+                                found_playlist_items.channels.clone(),
+                                found_playlist_items.uploads.clone(),
+                                found_playlist_items.playlist_items.clone(),
                             )
                         }
                     });
+
+            ui.horizontal(|ui| {
+                ui.label("Channels: ");
+                ui.monospace(channels.len().to_string());
+                ui.separator();
+
+                ui.label("Channels with uploads: ");
+                ui.monospace(videos.len().to_string());
+                ui.separator();
+
+                ui.label("Videos: ");
+                ui.monospace(videos.values().map(Vec::len).sum::<usize>().to_string());
+                ui.separator();
+
+                ui.label("New videos: ");
+                ui.monospace(
+                    videos
+                        .values()
+                        .flat_map(|v| {
+                            v.iter().filter(|video| {
+                                video.published_at > self.channel_discovery.last_seen_video
+                            })
+                        })
+                        .count()
+                        .to_string(),
+                );
+                ui.separator();
+
+                ui.label("Playlist videos: ");
+                ui.monospace(playlist_items.len().to_string());
+                ui.separator();
+
+                ui.label("New videos not in playlist: ");
+                ui.monospace(
+                    videos
+                        .values()
+                        .flat_map(|v| {
+                            v.iter()
+                                .filter(|video| {
+                                    video.published_at > self.channel_discovery.last_seen_video
+                                })
+                                .filter(|video| !playlist_items.contains(&video.id))
+                        })
+                        .count()
+                        .to_string(),
+                );
+                ui.separator();
+
+                ui.label("Previous last seen video: ");
+                ui.monospace(self.channel_discovery.last_seen_video.to_string());
+
+                if let Some(last_seen) = videos
+                    .values()
+                    .flat_map(|v| v.iter().map(|video| video.published_at))
+                    .max()
+                {
+                    ui.label("Current last seen video: ");
+                    ui.monospace(last_seen.to_string());
+                }
+            });
 
             let rows = self.table_cache.process(channels, |channels| {
                 tracing::debug!("sort");
@@ -213,11 +270,9 @@ impl eframe::App for AppUi {
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect::<Vec<_>>();
-                rows.sort_unstable_by_key(|(k, m)| m.name.clone());
+                rows.sort_unstable_by_key(|(_, m)| m.name.clone());
                 rows
             });
-
-            ui.checkbox(&mut self.show_only_new, "Show only new");
 
             let rows = if self.show_only_new {
                 &rows
@@ -226,9 +281,9 @@ impl eframe::App for AppUi {
                         videos
                             .get(channel)
                             .map(|videos| {
-                                videos
-                                    .iter()
-                                    .any(|video| date_filtered_videos.contains(&video.id))
+                                videos.iter().any(|video| {
+                                    video.published_at > self.channel_discovery.last_seen_video
+                                })
                             })
                             .unwrap_or(false)
                     })
@@ -239,8 +294,7 @@ impl eframe::App for AppUi {
             };
 
             // TODO: calculate quota?
-
-            ScrollArea::both().show(ui, |ui| {
+            ScrollArea::both().auto_shrink(Vec2b::FALSE).show(ui, |ui| {
                 show_columns(
                     ScrollArea::horizontal(),
                     ui,
@@ -254,6 +308,8 @@ impl eframe::App for AppUi {
 
                             ui.vertical(|ui| {
                                 ui.set_width(300.0);
+                                ui.take_available_height();
+
                                 ui.vertical_centered_justified(|ui| {
                                     ui.label(format!("#{i}"));
                                 });
@@ -286,20 +342,41 @@ impl eframe::App for AppUi {
                                 ui.separator();
 
                                 for video in videos {
+                                    let new =
+                                        video.published_at > self.channel_discovery.last_seen_video;
+
+                                    if self.show_only_new && !new {
+                                        break;
+                                    }
+
                                     ui.horizontal(|ui| {
                                         ui.label(format!("#{}", video.position));
 
-                                        if date_filtered_videos.contains(&video.id) {
+                                        let thumbnail = if playlist_items.contains(&video.id) {
+                                            ui.visuals_mut().override_text_color =
+                                                Some(Color32::GOLD);
+
+                                            true
+                                        } else if new {
                                             ui.visuals_mut().override_text_color =
                                                 Some(Color32::GREEN);
+                                            true
+                                        } else {
+                                            false
+                                        };
 
+                                        if thumbnail {
                                             ui.add_sized(
                                                 Vec2::ONE
                                                     * ui.text_style_height(&TextStyle::Monospace)
                                                     * 3.0,
                                                 Image::new(&video.thumbnail),
                                             );
-                                        }
+                                        } else {
+                                            ui.add_space(
+                                                ui.text_style_height(&TextStyle::Monospace) * 3.0,
+                                            );
+                                        };
 
                                         ui.vertical(|ui| {
                                             ui.label(&video.title);

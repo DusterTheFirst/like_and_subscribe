@@ -50,11 +50,6 @@ impl Default for OAuthState {
 }
 
 impl OAuthManager {
-    // TODO: Get token function with refreshing
-    pub fn block_for_token() {
-
-    }
-
     pub fn get_state(&mut self) -> AuthorizationState {
         fn handle_authorized(
             refresh_token: oauth2::RefreshToken,
