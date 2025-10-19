@@ -97,235 +97,115 @@ impl eframe::App for AppUi {
 
             ui.separator();
 
-            let (channels, playlist, videos, date_filtered_videos, is_short) = self
-                .channel_discovery
-                .observe_state(|channel_discovery, state| match state {
-                    ChannelDiscoveryState::Idle(idle) => {
-                        if ui.button("Discover Channels").clicked() {
-                            idle.start(channel_discovery, access_token);
-                        };
-                        (
-                            HashMap::new(),
-                            HashMap::new(),
-                            HashMap::new(),
-                            HashSet::new(),
-                            HashMap::new(),
-                        )
-                    }
-                    ChannelDiscoveryState::Discovering(discovering) => {
-                        match discovering.total_channel_count {
-                            Some(total) => {
-                                let channels = discovering.channels.len();
-
-                                ui.add(
-                                    ProgressBar::new((channels as f32) / (total as f32))
-                                        .text(format!("{channels}/{total}")),
-                                );
-                            }
-                            None => {
-                                ui.add(ProgressBar::new(0.0));
-                            }
+            let (channels, videos, date_filtered_videos) =
+                self.channel_discovery
+                    .observe_state(|channel_discovery, state| match state {
+                        ChannelDiscoveryState::Idle(idle) => {
+                            if ui.button("Discover Channels").clicked() {
+                                idle.start(channel_discovery, access_token);
+                            };
+                            (HashMap::new(), HashMap::new(), HashSet::new())
                         }
+                        ChannelDiscoveryState::Discovering(discovering) => {
+                            match discovering.total_channel_count {
+                                Some(total) => {
+                                    let channels = discovering.channels.len();
 
-                        (
-                            discovering.channels.clone(),
-                            HashMap::new(),
-                            HashMap::new(),
-                            HashSet::new(),
-                            HashMap::new(),
-                        )
-                    }
-                    ChannelDiscoveryState::Discovered(discovered) => {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("Channels: {}", discovered.channels.len()));
-
-                            if ui.button("Elaborate Channels").clicked() {
-                                discovered.elaborate(channel_discovery, access_token);
+                                    ui.add(
+                                        ProgressBar::new((channels as f32) / (total as f32))
+                                            .text(format!("{channels}/{total}")),
+                                    );
+                                }
+                                None => {
+                                    ui.add(ProgressBar::new(0.0));
+                                }
                             }
-                        });
 
-                        (
-                            discovered.channels.clone(),
-                            HashMap::new(),
-                            HashMap::new(),
-                            HashSet::new(),
-                            HashMap::new(),
-                        )
-                    }
-                    ChannelDiscoveryState::Elaborating(elaborating) => {
-                        let elaboration = elaborating.elaboration.len();
-                        let channels = elaborating.channels.len();
-                        ui.add(
-                            ProgressBar::new((elaboration as f32) / (channels as f32))
-                                .text(format!("{elaboration}/{channels}")),
-                        );
+                            (discovering.channels.clone(), HashMap::new(), HashSet::new())
+                        }
+                        ChannelDiscoveryState::Discovered(discovered) => {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("Channels: {}", discovered.channels.len()));
 
-                        (
-                            elaborating.channels.clone(),
-                            elaborating.elaboration.clone(),
-                            HashMap::new(),
-                            HashSet::new(),
-                            HashMap::new(),
-                        )
-                    }
-                    ChannelDiscoveryState::Elaborated(elaborated) => {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("Channels: {}", elaborated.channels.len()));
-                            ui.label(format!("Elaborations: {}", elaborated.elaboration.len()));
+                                if ui.button("Find uploads").clicked() {
+                                    discovered.find_uploads(channel_discovery, access_token);
+                                }
+                            });
 
-                            if ui.button("Find new uploads").clicked() {
-                                elaborated.find_uploads(channel_discovery, access_token);
-                            }
-                        });
+                            (discovered.channels.clone(), HashMap::new(), HashSet::new())
+                        }
+                        ChannelDiscoveryState::FindingUploads(finding_uploads) => {
+                            let uploads = finding_uploads.uploads.len();
+                            let channels = finding_uploads.channels.len();
 
-                        (
-                            elaborated.channels.clone(),
-                            elaborated.elaboration.clone(),
-                            HashMap::new(),
-                            HashSet::new(),
-                            HashMap::new(),
-                        )
-                    }
-                    ChannelDiscoveryState::FindingUploads(finding_uploads) => {
-                        let uploads = finding_uploads.uploads.len();
-                        let channels = finding_uploads.channels.len();
+                            ui.add(
+                                ProgressBar::new((uploads as f32) / (channels as f32))
+                                    .text(format!("{uploads}/{channels}")),
+                            );
 
-                        ui.add(
-                            ProgressBar::new((uploads as f32) / (channels as f32))
-                                .text(format!("{uploads}/{channels}")),
-                        );
+                            (
+                                finding_uploads.channels.clone(),
+                                finding_uploads.uploads.clone(),
+                                HashSet::new(),
+                            )
+                        }
+                        ChannelDiscoveryState::FoundUploads(found_uploads) => {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("Channels: {}", found_uploads.channels.len()));
+                                ui.label(format!(
+                                    "Channels with uploads: {}",
+                                    found_uploads.uploads.len()
+                                ));
+                                ui.label(format!(
+                                    "Total videos: {}",
+                                    found_uploads.uploads.values().map(Vec::len).sum::<usize>()
+                                ));
 
-                        (
-                            finding_uploads.channels.clone(),
-                            finding_uploads.elaboration.clone(),
-                            finding_uploads.uploads.clone(),
-                            HashSet::new(),
-                            HashMap::new(),
-                        )
-                    }
-                    ChannelDiscoveryState::FoundUploads(found_uploads) => {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("Channels: {}", found_uploads.channels.len()));
-                            ui.label(format!("Elaborations: {}", found_uploads.elaboration.len()));
-                            ui.label(format!(
-                                "Channels with uploads: {}",
-                                found_uploads.uploads.len()
-                            ));
-                            ui.label(format!(
-                                "Total videos: {}",
-                                found_uploads.uploads.values().map(Vec::len).sum::<usize>()
-                            ));
+                                ui.label("Filter: ");
+                                ui.monospace(channel_discovery.last_seen_video.to_string());
 
-                            ui.label("Filter: ");
-                            ui.monospace(channel_discovery.last_seen_video.to_string());
+                                if ui.button("Filter by date").clicked() {
+                                    found_uploads.filter(
+                                        channel_discovery,
+                                        channel_discovery.last_seen_video,
+                                    );
+                                }
+                            });
 
-                            if ui.button("Filter by date").clicked() {
-                                found_uploads
-                                    .filter(channel_discovery, channel_discovery.last_seen_video);
-                            }
-                        });
+                            (
+                                found_uploads.channels.clone(),
+                                found_uploads.uploads.clone(),
+                                HashSet::new(),
+                            )
+                        }
+                        ChannelDiscoveryState::FilteredByDate(filtered) => {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("Channels: {}", filtered.channels.len()));
+                                ui.label(format!(
+                                    "Channels with uploads: {}",
+                                    filtered.uploads.len()
+                                ));
+                                ui.label(format!(
+                                    "Total videos: {}",
+                                    filtered.uploads.values().map(Vec::len).sum::<usize>()
+                                ));
+                                ui.label(format!(
+                                    "Total new videos: {}",
+                                    filtered.date_filtered_videos.len()
+                                ));
 
-                        (
-                            found_uploads.channels.clone(),
-                            found_uploads.elaboration.clone(),
-                            found_uploads.uploads.clone(),
-                            HashSet::new(),
-                            HashMap::new(),
-                        )
-                    }
-                    ChannelDiscoveryState::FilteredByDate(filtered) => {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("Channels: {}", filtered.channels.len()));
-                            ui.label(format!("Elaborations: {}", filtered.elaboration.len()));
-                            ui.label(format!("Channels with uploads: {}", filtered.uploads.len()));
-                            ui.label(format!(
-                                "Total videos: {}",
-                                filtered.uploads.values().map(Vec::len).sum::<usize>()
-                            ));
-                            ui.label(format!(
-                                "Total new videos: {}",
-                                filtered.date_filtered_videos.len()
-                            ));
+                                if ui.button("Filter by shorts").clicked() {
+                                    // filtered.filter(channel_discovery, access_token);
+                                }
+                            });
 
-                            if ui.button("Filter by shorts").clicked() {
-                                filtered.filter(channel_discovery, access_token);
-                            }
-                        });
-
-                        (
-                            filtered.channels.clone(),
-                            filtered.elaboration.clone(),
-                            filtered.uploads.clone(),
-                            filtered.date_filtered_videos.clone(),
-                            HashMap::new(),
-                        )
-                    }
-                    ChannelDiscoveryState::FilteringByShorts(filtering_by_shorts) => {
-                        let total = filtering_by_shorts.date_filtered_videos.len();
-                        let shorts = filtering_by_shorts.is_short.len();
-
-                        ui.add(
-                            ProgressBar::new((shorts as f32) / (total as f32))
-                                .text(format!("{shorts}/{total}")),
-                        );
-
-                        (
-                            filtering_by_shorts.channels.clone(),
-                            filtering_by_shorts.elaboration.clone(),
-                            filtering_by_shorts.uploads.clone(),
-                            filtering_by_shorts.date_filtered_videos.clone(),
-                            filtering_by_shorts.is_short.clone(),
-                        )
-                    }
-                    ChannelDiscoveryState::FilteredByShorts(filtered_by_shorts) => {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("Channels: {}", filtered_by_shorts.channels.len()));
-                            ui.label(format!(
-                                "Elaborations: {}",
-                                filtered_by_shorts.elaboration.len()
-                            ));
-                            ui.label(format!(
-                                "Channels with uploads: {}",
-                                filtered_by_shorts.uploads.len()
-                            ));
-                            ui.label(format!(
-                                "Total videos: {}",
-                                filtered_by_shorts
-                                    .uploads
-                                    .values()
-                                    .map(Vec::len)
-                                    .sum::<usize>()
-                            ));
-                            ui.label(format!(
-                                "Total new videos: {}",
-                                filtered_by_shorts.date_filtered_videos.len()
-                            ));
-                            ui.label(format!(
-                                "Total short videos: {}",
-                                filtered_by_shorts.is_short.values().filter(|x| **x).count()
-                            ));
-                            ui.label(format!(
-                                "Total non-short videos: {}",
-                                filtered_by_shorts
-                                    .is_short
-                                    .values()
-                                    .filter(|x| !**x)
-                                    .count()
-                            ));
-
-                            ui.button("Filter if in playlist");
-                            ui.button("Add new uploads to playlist");
-                        });
-
-                        (
-                            filtered_by_shorts.channels.clone(),
-                            filtered_by_shorts.elaboration.clone(),
-                            filtered_by_shorts.uploads.clone(),
-                            filtered_by_shorts.date_filtered_videos.clone(),
-                            filtered_by_shorts.is_short.clone(),
-                        )
-                    }
-                });
+                            (
+                                filtered.channels.clone(),
+                                filtered.uploads.clone(),
+                                filtered.date_filtered_videos.clone(),
+                            )
+                        }
+                    });
 
             let rows = self.table_cache.process(channels, |channels| {
                 tracing::debug!("sort");
@@ -379,8 +259,6 @@ impl eframe::App for AppUi {
                                 });
                                 ui.separator();
 
-                                let channel_playlist = playlist.get(channel_id);
-
                                 ui.horizontal(|ui| {
                                     ui.add_sized(
                                         Vec2::ONE
@@ -391,10 +269,8 @@ impl eframe::App for AppUi {
 
                                     ui.vertical(|ui| {
                                         ui.label(&channel_metadata.name);
-                                        ui.monospace(channel_id.to_string());
-                                        if let Some(playlist) = channel_playlist {
-                                            ui.monospace(playlist.to_string());
-                                        }
+                                        ui.monospace(channel_id.as_ref());
+                                        ui.monospace(channel_id.playlist_long_form().as_ref());
                                     })
                                 });
 
@@ -411,17 +287,12 @@ impl eframe::App for AppUi {
 
                                 for video in videos {
                                     ui.horizontal(|ui| {
-                                        if let Some(true) = is_short.get(&video.id) {
-                                            ui.visuals_mut().override_text_color =
-                                                Some(Color32::RED);
-                                        } else if date_filtered_videos.contains(&video.id) {
-                                            ui.visuals_mut().override_text_color =
-                                                Some(Color32::GREEN);
-                                        }
-
                                         ui.label(format!("#{}", video.position));
 
                                         if date_filtered_videos.contains(&video.id) {
+                                            ui.visuals_mut().override_text_color =
+                                                Some(Color32::GREEN);
+
                                             ui.add_sized(
                                                 Vec2::ONE
                                                     * ui.text_style_height(&TextStyle::Monospace)

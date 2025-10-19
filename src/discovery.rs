@@ -9,32 +9,49 @@ use eframe::egui::{
     Context,
     ahash::{HashMap, HashMapExt, HashSet},
 };
-use google_youtube3::{
-    api::{
-        ChannelListResponse, PlaylistItemListResponse, SubscriptionListResponse, VideoListResponse,
-    },
-    common::serde::duration,
-};
-use jiff::{SignedDuration, Span, Timestamp};
+use google_youtube3::api::{PlaylistItemListResponse, SubscriptionListResponse};
+use jiff::Timestamp;
 use oauth2::{AccessToken, ureq};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use regex::Regex;
 
 use crate::database::Database;
 
 mod shorts;
 
-#[nutype::nutype(derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Display))]
+#[nutype::nutype(
+    derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Display, AsRef, Borrow),
+    validate(predicate = |str| str.starts_with("UC"))
+)]
 pub struct ChannelId(String);
 
-#[nutype::nutype(derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Display))]
+impl ChannelId {
+    fn internal_id(&self) -> &str {
+        self.as_ref().strip_prefix("UC").unwrap()
+    }
+
+    pub fn playlist_uploads(&self) -> PlaylistId {
+        PlaylistId::new(format!("UU{}", self.internal_id()))
+    }
+    pub fn playlist_shorts(&self) -> PlaylistId {
+        PlaylistId::new(format!("UUSH{}", self.internal_id()))
+    }
+    pub fn playlist_long_form(&self) -> PlaylistId {
+        PlaylistId::new(format!("UULF{}", self.internal_id()))
+    }
+    pub fn playlist_livestream(&self) -> PlaylistId {
+        PlaylistId::new(format!("UULV{}", self.internal_id()))
+    }
+}
+
+#[nutype::nutype(derive(
+    Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Display, AsRef, Borrow
+))]
 pub struct PlaylistId(String);
 
-#[nutype::nutype(derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Display))]
+#[nutype::nutype(derive(
+    Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Display, AsRef, Borrow
+))]
 pub struct VideoId(String);
-
-#[nutype::nutype(derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Display))]
-pub struct PlaylistItemId(String);
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct ChannelMetadata {
@@ -112,35 +129,8 @@ impl ChannelDiscovery {
                     })
                 }
             }
-            ChannelDiscoveryState::Elaborating(Elaborating {
-                channels,
-                mut elaboration,
-                handle,
-                incoming,
-            }) => {
-                while let Ok((channel, metadata)) = incoming.try_recv() {
-                    elaboration.insert(channel, metadata);
-                }
-
-                if handle.is_finished() {
-                    handle.join().unwrap();
-                    ChannelDiscoveryState::Elaborated(Elaborated {
-                        channels,
-                        elaboration,
-                    })
-                } else {
-                    ChannelDiscoveryState::Elaborating(Elaborating {
-                        channels,
-                        elaboration,
-
-                        handle,
-                        incoming,
-                    })
-                }
-            }
             ChannelDiscoveryState::FindingUploads(FindingUploads {
                 channels,
-                elaboration,
                 mut uploads,
 
                 handle,
@@ -154,53 +144,12 @@ impl ChannelDiscovery {
                     handle.join().unwrap();
                     ChannelDiscoveryState::FoundUploads(FoundUploads {
                         channels,
-                        elaboration,
                         uploads,
                     })
                 } else {
                     ChannelDiscoveryState::FindingUploads(FindingUploads {
                         channels,
-                        elaboration,
                         uploads,
-
-                        handle,
-                        incoming,
-                    })
-                }
-            }
-            ChannelDiscoveryState::FilteringByShorts(FilteringByShorts {
-                channels,
-                elaboration,
-                uploads,
-
-                date_filtered_videos,
-                mut is_short,
-
-                handle,
-                incoming,
-            }) => {
-                while let Ok((video, metadata)) = incoming.try_recv() {
-                    is_short.insert(video, metadata);
-                }
-
-                if handle.is_finished() {
-                    handle.join().unwrap();
-                    ChannelDiscoveryState::FilteredByShorts(FilteredByShorts {
-                        channels,
-                        elaboration,
-                        uploads,
-
-                        date_filtered_videos,
-                        is_short,
-                    })
-                } else {
-                    ChannelDiscoveryState::FilteringByShorts(FilteringByShorts {
-                        channels,
-                        elaboration,
-                        uploads,
-
-                        date_filtered_videos,
-                        is_short,
 
                         handle,
                         incoming,
@@ -253,46 +202,14 @@ pub struct Discovered {
     pub channels: HashMap<ChannelId, ChannelMetadata>,
 }
 impl Discovered {
-    pub fn elaborate(&mut self, discovery: &mut ChannelDiscovery, access_token: AccessToken) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let context = discovery.context.clone();
-        let channel_ids = self.channels.keys().cloned().collect::<Vec<_>>();
-
-        let handle = std::thread::spawn(|| {
-            elaborate_all_channels(channel_ids, access_token, tx, context);
-        });
-
-        discovery.state = ChannelDiscoveryState::Elaborating(Elaborating {
-            channels: std::mem::take(&mut self.channels),
-            elaboration: HashMap::new(),
-
-            incoming: rx,
-            handle,
-        });
-    }
-}
-
-pub struct Elaborating {
-    pub channels: HashMap<ChannelId, ChannelMetadata>,
-    pub elaboration: HashMap<ChannelId, PlaylistId>,
-
-    handle: JoinHandle<()>,
-    incoming: Receiver<(ChannelId, PlaylistId)>,
-}
-
-pub struct Elaborated {
-    pub channels: HashMap<ChannelId, ChannelMetadata>,
-    pub elaboration: HashMap<ChannelId, PlaylistId>,
-}
-impl Elaborated {
     pub fn find_uploads(&mut self, discovery: &mut ChannelDiscovery, access_token: AccessToken) {
         let (tx, rx) = std::sync::mpsc::channel();
         let context = discovery.context.clone();
         let playlist_ids = {
             let mut ids = self
-                .elaboration
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .channels
+                .keys()
+                .map(|k| (k.clone(), k.playlist_long_form()))
                 .collect::<Vec<_>>();
 
             ids.sort_unstable_by_key(|(c, _)| &self.channels.get(c).unwrap().name);
@@ -306,7 +223,6 @@ impl Elaborated {
 
         discovery.state = ChannelDiscoveryState::FindingUploads(FindingUploads {
             channels: std::mem::take(&mut self.channels),
-            elaboration: std::mem::take(&mut self.elaboration),
             uploads: HashMap::new(),
 
             incoming: rx,
@@ -317,7 +233,6 @@ impl Elaborated {
 
 pub struct FindingUploads {
     pub channels: HashMap<ChannelId, ChannelMetadata>,
-    pub elaboration: HashMap<ChannelId, PlaylistId>,
     pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
 
     handle: JoinHandle<()>,
@@ -326,7 +241,6 @@ pub struct FindingUploads {
 
 pub struct FoundUploads {
     pub channels: HashMap<ChannelId, ChannelMetadata>,
-    pub elaboration: HashMap<ChannelId, PlaylistId>,
     pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
 }
 impl FoundUploads {
@@ -347,7 +261,6 @@ impl FoundUploads {
                 .collect(),
 
             channels: std::mem::take(&mut self.channels),
-            elaboration: std::mem::take(&mut self.elaboration),
             uploads: std::mem::take(&mut self.uploads),
         });
     }
@@ -355,59 +268,38 @@ impl FoundUploads {
 
 pub struct FilteredByDate {
     pub channels: HashMap<ChannelId, ChannelMetadata>,
-    pub elaboration: HashMap<ChannelId, PlaylistId>,
     pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
 
     pub date_filtered_videos: HashSet<VideoId>,
 }
 impl FilteredByDate {
-    pub fn filter(&mut self, discovery: &mut ChannelDiscovery, access_token: AccessToken) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let context = discovery.context.clone();
-        let video_ids = self
-            .date_filtered_videos
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
+    // pub fn filter(&mut self, discovery: &mut ChannelDiscovery, access_token: AccessToken) {
+    //     let (tx, rx) = std::sync::mpsc::channel();
+    //     let context = discovery.context.clone();
+    //     let video_ids = self
+    //         .date_filtered_videos
+    //         .iter()
+    //         .cloned()
+    //         .collect::<Vec<_>>();
 
-        let handle = std::thread::spawn(|| {
-            determine_is_short(video_ids, access_token, tx, context);
-        });
+    //     let handle = std::thread::spawn(|| {
+    //         get_items_in_playlist(video_ids, access_token, tx, context);
+    //     });
 
-        discovery.state = ChannelDiscoveryState::FilteringByShorts(FilteringByShorts {
-            channels: std::mem::take(&mut self.channels),
-            elaboration: std::mem::take(&mut self.elaboration),
-            uploads: std::mem::take(&mut self.uploads),
+    //     discovery.state = ChannelDiscoveryState::FilteringByShorts(FilteringByShorts {
+    //         channels: std::mem::take(&mut self.channels),
+    //         elaboration: std::mem::take(&mut self.elaboration),
+    //         uploads: std::mem::take(&mut self.uploads),
 
-            date_filtered_videos: std::mem::take(&mut self.date_filtered_videos),
-            is_short: HashMap::new(),
+    //         date_filtered_videos: std::mem::take(&mut self.date_filtered_videos),
+    //         is_short: HashMap::new(),
 
-            incoming: rx,
-            handle,
-        });
-    }
+    //         incoming: rx,
+    //         handle,
+    //     });
+    // }
 }
 
-pub struct FilteringByShorts {
-    pub channels: HashMap<ChannelId, ChannelMetadata>,
-    pub elaboration: HashMap<ChannelId, PlaylistId>,
-    pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
-
-    pub date_filtered_videos: HashSet<VideoId>,
-    pub is_short: HashMap<VideoId, bool>,
-
-    handle: JoinHandle<()>,
-    incoming: Receiver<(VideoId, bool)>,
-}
-
-pub struct FilteredByShorts {
-    pub channels: HashMap<ChannelId, ChannelMetadata>,
-    pub elaboration: HashMap<ChannelId, PlaylistId>,
-    pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
-
-    pub date_filtered_videos: HashSet<VideoId>,
-    pub is_short: HashMap<VideoId, bool>,
-}
 // pub struct FilteredByPlaylist {}
 
 pub enum ChannelDiscoveryState {
@@ -416,16 +308,10 @@ pub enum ChannelDiscoveryState {
     Discovering(Discovering),
     Discovered(Discovered),
 
-    Elaborating(Elaborating),
-    Elaborated(Elaborated),
-
     FindingUploads(FindingUploads),
     FoundUploads(FoundUploads),
 
     FilteredByDate(FilteredByDate),
-
-    FilteringByShorts(FilteringByShorts),
-    FilteredByShorts(FilteredByShorts),
 }
 
 impl Default for ChannelDiscoveryState {
@@ -471,7 +357,7 @@ fn get_all_channels(
 
             debug_assert_eq!(resource.kind.as_deref(), Some("youtube#channel"));
 
-            let channel_id = ChannelId::new(resource.channel_id.unwrap());
+            let channel_id = ChannelId::try_new(resource.channel_id.unwrap()).unwrap();
             let channel_name = snippet.title.unwrap();
             let channel_thumbnail = {
                 let thumbnail = snippet.thumbnails.unwrap();
@@ -504,55 +390,6 @@ fn get_all_channels(
         if page_token.is_none() {
             break;
         }
-    }
-}
-
-// Playlists are always -> channel_id.replacen("UC", "UU", 1);
-fn elaborate_all_channels(
-    channel_ids: Vec<ChannelId>,
-    token: AccessToken,
-    channel: Sender<(ChannelId, PlaylistId)>,
-    context: Context,
-) {
-    for chunk in channel_ids.chunks(50) {
-        let url =
-            "https://www.googleapis.com/youtube/v3/channels?part=id,contentDetails&maxResults=50";
-        let url = format!(
-            "{url}&id={}",
-            chunk
-                .iter()
-                .cloned()
-                .map(ChannelId::into_inner)
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-
-        let json = ureq::get(url.as_ref())
-            .set("Authorization", &format!("Bearer {}", token.secret()))
-            .call()
-            .unwrap()
-            .into_json::<ChannelListResponse>()
-            .unwrap();
-
-        let items = json.items.unwrap();
-
-        for item in items {
-            channel
-                .send((
-                    ChannelId::new(item.id.unwrap()),
-                    PlaylistId::new(
-                        item.content_details
-                            .unwrap()
-                            .related_playlists
-                            .unwrap()
-                            .uploads
-                            .unwrap(),
-                    ),
-                ))
-                .unwrap();
-        }
-        tracing::info!("chunk");
-        context.request_repaint();
     }
 }
 
@@ -615,79 +452,4 @@ fn find_recent_uploads(
         channel.send((channel_id, videos)).unwrap();
         context.request_repaint();
     });
-}
-
-fn determine_is_short(
-    video_ids: Vec<VideoId>,
-    token: AccessToken,
-    channel: Sender<(VideoId, bool)>,
-    context: Context,
-) {
-    let embed_regex = Regex::new(r#"width="(\d+)"\s+height="(\d+)""#).unwrap();
-
-    for videos in video_ids.chunks(50) {
-        let url = "https://www.googleapis.com/youtube/v3/videos?part=contentDetails,player,snippet&maxResults=50";
-        let url = format!(
-            "{url}&id={}",
-            videos
-                .iter()
-                .cloned()
-                .map(VideoId::into_inner)
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-
-        let json = ureq::get(url.as_ref())
-            .set("Authorization", &format!("Bearer {}", token.secret()))
-            .call()
-            .unwrap()
-            .into_json::<VideoListResponse>()
-            .unwrap();
-
-        let videos = match json.items {
-            Some(items) => items,
-            None => {
-                // TODO: Report
-                tracing::warn!("no videos returned");
-                return;
-            }
-        };
-
-        for video in videos {
-            let video_id = video.id.unwrap();
-
-            let is_livestream = video.snippet.unwrap().live_broadcast_content.unwrap() != "none";
-
-            if is_livestream {
-                tracing::trace!(video_id, "livestream");
-                continue;
-            }
-
-            let duration = video.content_details.unwrap().duration.unwrap();
-            let duration = duration.parse::<SignedDuration>().unwrap_or_else(|error| {
-                panic!(
-                    "Failed to parse duration \"{duration}\" of video {video_id} due to: {error}"
-                )
-            });
-
-            let is_duration_ok = duration <= SignedDuration::from_mins(3);
-
-            let embed_html = video.player.unwrap().embed_html.unwrap();
-            let Some(captures) = embed_regex.captures(&embed_html) else {
-                tracing::error!(%embed_html, ?embed_regex, "regex failed to match embed html");
-                continue;
-            };
-            let is_aspect_ratio_ok = {
-                let width: u32 = captures[1].parse().unwrap();
-                let height: u32 = captures[2].parse().unwrap();
-                height >= width && width > 0
-            };
-
-            let is_short = is_duration_ok && is_aspect_ratio_ok;
-
-            channel.send((VideoId::new(video_id), is_short)).unwrap();
-        }
-        tracing::info!("Processed a chunk of videos for Shorts detection.");
-        context.request_repaint();
-    }
 }
