@@ -65,7 +65,6 @@ pub struct ChannelMetadata {
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct VideoMetadata {
-    pub id: VideoId,
     pub title: String,
     pub thumbnail: String,
     pub published_at: Timestamp,
@@ -139,24 +138,34 @@ impl ChannelDiscovery {
             }
             ChannelDiscoveryState::FindingUploads(FindingUploads {
                 channels,
+                mut videos,
+
                 mut uploads,
 
                 handle,
                 incoming,
             }) => {
-                while let Ok((channel, metadata)) = incoming.try_recv() {
+                while let Ok((channel, new_videos)) = incoming.try_recv() {
                     uploads
                         .entry(channel)
                         .or_default()
-                        .extend_from_slice(metadata.as_slice());
+                        .extend(new_videos.iter().map(|(id, _)| id.clone()));
+
+                    videos.extend(new_videos);
                 }
 
                 if handle.is_finished() {
                     handle.join().unwrap();
-                    ChannelDiscoveryState::FoundUploads(FoundUploads { channels, uploads })
+                    ChannelDiscoveryState::FoundUploads(FoundUploads {
+                        channels,
+                        videos,
+                        uploads,
+                    })
                 } else {
                     ChannelDiscoveryState::FindingUploads(FindingUploads {
                         channels,
+                        videos,
+
                         uploads,
 
                         handle,
@@ -166,7 +175,10 @@ impl ChannelDiscovery {
             }
             ChannelDiscoveryState::FindingPlaylistItems(FindingPlaylistItems {
                 channels,
+                videos,
+
                 uploads,
+                new_videos,
 
                 mut playlist_items,
                 mut total_playlist_items,
@@ -183,13 +195,19 @@ impl ChannelDiscovery {
                     handle.join().unwrap();
                     ChannelDiscoveryState::FoundPlaylistItems(FoundPlaylistItems {
                         channels,
+                        videos,
+
                         uploads,
+                        new_videos,
                         playlist_items,
                     })
                 } else {
                     ChannelDiscoveryState::FindingPlaylistItems(FindingPlaylistItems {
                         channels,
+                        videos,
+
                         uploads,
+                        new_videos,
 
                         playlist_items,
                         total_playlist_items,
@@ -201,7 +219,10 @@ impl ChannelDiscovery {
             }
             ChannelDiscoveryState::DeterminingLanguages(DeterminingLanguages {
                 channels,
+                videos,
+
                 uploads,
+                new_videos,
                 playlist_items,
 
                 mut languages,
@@ -217,14 +238,22 @@ impl ChannelDiscovery {
                     handle.join().unwrap();
                     ChannelDiscoveryState::DeterminedLanguages(DeterminedLanguages {
                         channels,
+                        videos,
+
                         uploads,
+                        new_videos,
                         playlist_items,
                         languages,
+
+                        excluded_languages: HashSet::new(),
                     })
                 } else {
                     ChannelDiscoveryState::DeterminingLanguages(DeterminingLanguages {
                         channels,
+                        videos,
+
                         uploads,
+                        new_videos,
                         playlist_items,
 
                         languages,
@@ -301,6 +330,7 @@ impl Discovered {
         discovery.state = ChannelDiscoveryState::FindingUploads(FindingUploads {
             channels: std::mem::take(&mut self.channels),
             uploads: HashMap::new(),
+            videos: HashMap::new(),
 
             incoming: rx,
             handle,
@@ -310,18 +340,48 @@ impl Discovered {
 
 pub struct FindingUploads {
     pub channels: HashMap<ChannelId, ChannelMetadata>,
-    pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
+    pub videos: HashMap<VideoId, VideoMetadata>,
+
+    pub uploads: HashMap<ChannelId, Vec<VideoId>>,
 
     handle: JoinHandle<()>,
-    incoming: Receiver<(ChannelId, Vec<VideoMetadata>)>,
+    incoming: Receiver<(ChannelId, Vec<(VideoId, VideoMetadata)>)>,
 }
 
 pub struct FoundUploads {
     pub channels: HashMap<ChannelId, ChannelMetadata>,
-    pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
+    pub videos: HashMap<VideoId, VideoMetadata>,
+
+    pub uploads: HashMap<ChannelId, Vec<VideoId>>,
+}
+impl FoundUploads {
+    pub fn filter(&mut self, discovery: &mut ChannelDiscovery, until: Timestamp) {
+        discovery.state = ChannelDiscoveryState::FilteredByDate(FilteredByDate {
+            new_videos: self
+                .videos
+                .iter()
+                .filter(|(_, m)| m.published_at > until)
+                .map(|(id, _)| id.clone())
+                .collect(),
+
+            channels: std::mem::take(&mut self.channels),
+            videos: std::mem::take(&mut self.videos),
+
+            uploads: std::mem::take(&mut self.uploads),
+        })
+    }
 }
 
-impl FoundUploads {
+pub struct FilteredByDate {
+    pub channels: HashMap<ChannelId, ChannelMetadata>,
+    pub videos: HashMap<VideoId, VideoMetadata>,
+
+    pub uploads: HashMap<ChannelId, Vec<VideoId>>,
+
+    pub new_videos: HashSet<VideoId>,
+}
+
+impl FilteredByDate {
     pub fn find_playlist_items(
         &mut self,
         discovery: &mut ChannelDiscovery,
@@ -337,7 +397,11 @@ impl FoundUploads {
 
         discovery.state = ChannelDiscoveryState::FindingPlaylistItems(FindingPlaylistItems {
             channels: std::mem::take(&mut self.channels),
+            videos: std::mem::take(&mut self.videos),
+
             uploads: std::mem::take(&mut self.uploads),
+            new_videos: std::mem::take(&mut self.new_videos),
+
             playlist_items: HashSet::new(),
             total_playlist_items: None,
 
@@ -346,10 +410,14 @@ impl FoundUploads {
         });
     }
 }
-
 pub struct FindingPlaylistItems {
     pub channels: HashMap<ChannelId, ChannelMetadata>,
-    pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
+    pub videos: HashMap<VideoId, VideoMetadata>,
+
+    pub uploads: HashMap<ChannelId, Vec<VideoId>>,
+
+    pub new_videos: HashSet<VideoId>,
+
     pub playlist_items: HashSet<VideoId>,
     pub total_playlist_items: Option<i32>,
 
@@ -359,7 +427,11 @@ pub struct FindingPlaylistItems {
 
 pub struct FoundPlaylistItems {
     pub channels: HashMap<ChannelId, ChannelMetadata>,
-    pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
+    pub videos: HashMap<VideoId, VideoMetadata>,
+
+    pub uploads: HashMap<ChannelId, Vec<VideoId>>,
+
+    pub new_videos: HashSet<VideoId>,
     pub playlist_items: HashSet<VideoId>,
 }
 
@@ -373,12 +445,8 @@ impl FoundPlaylistItems {
         let context = discovery.context.clone();
 
         let videos = self
-            .uploads
-            .values()
-            .flat_map(|v| v.iter())
-            .filter(|v| v.published_at > discovery.last_seen_video)
-            .filter(|v| !self.playlist_items.contains(&v.id))
-            .map(|v| &v.id)
+            .new_videos
+            .difference(&self.playlist_items)
             .cloned()
             .collect::<Vec<_>>();
 
@@ -388,7 +456,10 @@ impl FoundPlaylistItems {
 
         discovery.state = ChannelDiscoveryState::DeterminingLanguages(DeterminingLanguages {
             channels: std::mem::take(&mut self.channels),
+            videos: std::mem::take(&mut self.videos),
+
             uploads: std::mem::take(&mut self.uploads),
+            new_videos: std::mem::take(&mut self.new_videos),
             playlist_items: std::mem::take(&mut self.playlist_items),
 
             languages: HashMap::new(),
@@ -401,7 +472,11 @@ impl FoundPlaylistItems {
 
 pub struct DeterminingLanguages {
     pub channels: HashMap<ChannelId, ChannelMetadata>,
-    pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
+    pub videos: HashMap<VideoId, VideoMetadata>,
+
+    pub uploads: HashMap<ChannelId, Vec<VideoId>>,
+
+    pub new_videos: HashSet<VideoId>,
     pub playlist_items: HashSet<VideoId>,
     pub languages: HashMap<String, HashSet<VideoId>>,
 
@@ -411,9 +486,15 @@ pub struct DeterminingLanguages {
 
 pub struct DeterminedLanguages {
     pub channels: HashMap<ChannelId, ChannelMetadata>,
-    pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
+    pub videos: HashMap<VideoId, VideoMetadata>,
+
+    pub uploads: HashMap<ChannelId, Vec<VideoId>>,
+
+    pub new_videos: HashSet<VideoId>,
     pub playlist_items: HashSet<VideoId>,
     pub languages: HashMap<String, HashSet<VideoId>>,
+
+    pub excluded_languages: HashSet<String>,
 }
 
 pub enum ChannelDiscoveryState {
@@ -425,11 +506,15 @@ pub enum ChannelDiscoveryState {
     FindingUploads(FindingUploads),
     FoundUploads(FoundUploads),
 
+    FilteredByDate(FilteredByDate),
+
     FindingPlaylistItems(FindingPlaylistItems),
     FoundPlaylistItems(FoundPlaylistItems),
 
+    // FilteredByPlaylist(FilteredByPlaylist),
     DeterminingLanguages(DeterminingLanguages),
     DeterminedLanguages(DeterminedLanguages),
+    // FilteredByLanguage(FilteredByPlaylist),
 }
 
 impl Default for ChannelDiscoveryState {
@@ -515,7 +600,7 @@ fn find_recent_uploads(
     playlist_ids: Vec<(ChannelId, PlaylistId)>,
     token: AccessToken,
     until: Timestamp,
-    channel: Sender<(ChannelId, Vec<VideoMetadata>)>,
+    channel: Sender<(ChannelId, Vec<(VideoId, VideoMetadata)>)>,
     context: Context,
 ) {
     playlist_ids.into_par_iter().for_each(|(channel_id, playlist_id)| {
@@ -569,13 +654,13 @@ fn find_recent_uploads(
                         should_break = true;
                     }
 
+                    (video_id,
                     VideoMetadata {
-                        id: video_id,
                         title,
                         thumbnail: thumbnail.url.unwrap(),
                         published_at,
                         position,
-                    }
+                    })
                 })
                 .collect::<Vec<_>>();
 
@@ -676,7 +761,10 @@ fn determine_video_languages(
             channel
                 .send((
                     VideoId::new(item.id.unwrap()),
-                    item.snippet.unwrap().default_audio_language.unwrap(),
+                    item.snippet
+                        .unwrap()
+                        .default_audio_language
+                        .unwrap_or_else(|| String::from("unknown")),
                 ))
                 .unwrap();
         }

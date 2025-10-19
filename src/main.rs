@@ -12,7 +12,6 @@ use crate::{
     ui::AppUi,
 };
 
-mod cache;
 mod database;
 mod discovery;
 mod oauth;

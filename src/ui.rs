@@ -1,13 +1,11 @@
 use eframe::egui::{
     self, Button, CentralPanel, Color32, Image, ProgressBar, Rect, ScrollArea, TextStyle,
     UiBuilder, Vec2, Vec2b,
-    ahash::{HashMap, HashMapExt, HashSet, HashSetExt},
 };
 use jiff::tz::TimeZone;
 
 use crate::{
-    cache::CacheProcess,
-    discovery::{ChannelDiscovery, ChannelDiscoveryState, ChannelId, ChannelMetadata},
+    discovery::{ChannelDiscovery, ChannelDiscoveryState},
     oauth::{AuthorizationState, Authorize as _, OAuthManager, Refresh as _},
 };
 
@@ -16,11 +14,7 @@ pub struct AppUi {
 
     channel_discovery: ChannelDiscovery,
 
-    table_cache:
-        CacheProcess<HashMap<ChannelId, ChannelMetadata>, Vec<(ChannelId, ChannelMetadata)>>,
-
     show_only_new: bool,
-    excluded_languages: HashSet<String>,
 }
 
 impl AppUi {
@@ -29,10 +23,7 @@ impl AppUi {
             auth,
             channel_discovery,
 
-            table_cache: Default::default(),
-
             show_only_new: false,
-            excluded_languages: HashSet::new(),
         }
     }
 }
@@ -98,268 +89,333 @@ impl eframe::App for AppUi {
 
             ui.separator();
 
-            let (channels, videos, playlist_items, languages) = self
-                .channel_discovery
-                .observe_state(|channel_discovery, state| match state {
-                    ChannelDiscoveryState::Idle(idle) => {
-                        if ui.button("Discover Channels").clicked() {
-                            idle.start(channel_discovery, access_token);
-                        };
-                        (
-                            HashMap::new(),
-                            HashMap::new(),
-                            HashSet::new(),
-                            HashMap::new(),
-                        )
-                    }
-                    ChannelDiscoveryState::Discovering(discovering) => {
-                        match discovering.total_channel_count {
-                            Some(total) => {
-                                let channels = discovering.channels.len();
+            let mut display_channels =
+                self.channel_discovery
+                    .observe_state(|channel_discovery, state| match state {
+                        ChannelDiscoveryState::Idle(state) => {
+                            if ui.button("Discover Channels").clicked() {
+                                state.start(channel_discovery, access_token);
+                            };
 
-                                ui.add(
-                                    ProgressBar::new((channels as f32) / (total as f32))
-                                        .text(format!("{channels}/{total}")),
-                                );
-                            }
-                            None => {
-                                ui.add(ProgressBar::new(0.0));
-                            }
+                            Vec::new()
                         }
+                        ChannelDiscoveryState::Discovering(state) => {
+                            match state.total_channel_count {
+                                Some(total) => {
+                                    let channels = state.channels.len();
 
-                        (
-                            discovering.channels.clone(),
-                            HashMap::new(),
-                            HashSet::new(),
-                            HashMap::new(),
-                        )
-                    }
-                    ChannelDiscoveryState::Discovered(discovered) => {
-                        ui.horizontal(|ui| {
-                            if ui.button("Find uploads until date").clicked() {
-                                discovered.find_uploads(
-                                    channel_discovery,
-                                    channel_discovery.last_seen_video,
-                                    access_token,
-                                );
+                                    ui.add(
+                                        ProgressBar::new((channels as f32) / (total as f32))
+                                            .text(format!("{channels}/{total}")),
+                                    );
+                                }
+                                None => {
+                                    ui.add(ProgressBar::new(0.0));
+                                }
                             }
-                        });
 
-                        (
-                            discovered.channels.clone(),
-                            HashMap::new(),
-                            HashSet::new(),
-                            HashMap::new(),
-                        )
-                    }
-                    ChannelDiscoveryState::FindingUploads(finding_uploads) => {
-                        let uploads = finding_uploads.uploads.len();
-                        let channels = finding_uploads.channels.len();
-
-                        ui.add(
-                            ProgressBar::new((uploads as f32) / (channels as f32))
-                                .text(format!("{uploads}/{channels}")),
-                        );
-
-                        (
-                            finding_uploads.channels.clone(),
-                            finding_uploads.uploads.clone(),
-                            HashSet::new(),
-                            HashMap::new(),
-                        )
-                    }
-                    ChannelDiscoveryState::FoundUploads(found_uploads) => {
-                        if ui.button("Filter by playlist").clicked() {
-                            found_uploads.find_playlist_items(channel_discovery, access_token);
+                            state
+                                .channels
+                                .iter()
+                                .map(|(channel, meta)| (channel.clone(), meta.clone(), Vec::new()))
+                                .collect()
                         }
+                        ChannelDiscoveryState::Discovered(state) => {
+                            ui.horizontal(|ui| {
+                                if ui.button("Find uploads until date").clicked() {
+                                    state.find_uploads(
+                                        channel_discovery,
+                                        channel_discovery.last_seen_video,
+                                        access_token,
+                                    );
+                                }
+                            });
 
-                        (
-                            found_uploads.channels.clone(),
-                            found_uploads.uploads.clone(),
-                            HashSet::new(),
-                            HashMap::new(),
-                        )
-                    }
-                    ChannelDiscoveryState::FindingPlaylistItems(finding_playlist_items) => {
-                        match finding_playlist_items.total_playlist_items {
-                            Some(total) => {
-                                let items = finding_playlist_items.playlist_items.len();
-
-                                ui.add(
-                                    ProgressBar::new((items as f32) / (total as f32))
-                                        .text(format!("{items}/{total}")),
-                                );
-                            }
-                            None => {
-                                ui.add(ProgressBar::new(0.0));
-                            }
+                            state
+                                .channels
+                                .iter()
+                                .map(|(channel, meta)| (channel.clone(), meta.clone(), Vec::new()))
+                                .collect()
                         }
+                        ChannelDiscoveryState::FindingUploads(state) => {
+                            let uploads = state.uploads.len();
+                            let channels = state.channels.len();
 
-                        (
-                            finding_playlist_items.channels.clone(),
-                            finding_playlist_items.uploads.clone(),
-                            finding_playlist_items.playlist_items.clone(),
-                            HashMap::new(),
-                        )
-                    }
-                    ChannelDiscoveryState::FoundPlaylistItems(found_playlist_items) => {
-                        if ui.button("Determine languages").clicked() {
-                            found_playlist_items
-                                .determine_video_languages(channel_discovery, access_token);
-                        }
+                            ui.add(
+                                ProgressBar::new((uploads as f32) / (channels as f32))
+                                    .text(format!("{uploads}/{channels}")),
+                            );
 
-                        (
-                            found_playlist_items.channels.clone(),
-                            found_playlist_items.uploads.clone(),
-                            found_playlist_items.playlist_items.clone(),
-                            HashMap::new(),
-                        )
-                    }
-                    ChannelDiscoveryState::DeterminingLanguages(determining_languages) => {
-                        let total_videos = determining_languages
-                            .uploads
-                            .values()
-                            .flat_map(|v| {
-                                v.iter().filter(|video| {
-                                    video.published_at > channel_discovery.last_seen_video
+                            state
+                                .channels
+                                .iter()
+                                .map(|(channel, meta)| {
+                                    (
+                                        channel.clone(),
+                                        meta.clone(),
+                                        state
+                                            .uploads
+                                            .get(channel)
+                                            .map(Vec::as_slice)
+                                            .unwrap_or_default()
+                                            .iter()
+                                            .map(|video| {
+                                                (
+                                                    video.clone(),
+                                                    state.videos[video].clone(),
+                                                    false,
+                                                    false,
+                                                )
+                                            })
+                                            .collect(),
+                                    )
                                 })
-                            })
-                            .count();
-                        let videos_with_language =
-                            determining_languages.languages.values().flatten().count();
-
-                        ui.add(
-                            ProgressBar::new((videos_with_language as f32) / (total_videos as f32))
-                                .text(format!("{videos_with_language}/{total_videos}")),
-                        );
-
-                        (
-                            determining_languages.channels.clone(),
-                            determining_languages.uploads.clone(),
-                            determining_languages.playlist_items.clone(),
-                            determining_languages.languages.clone(),
-                        )
-                    }
-                    ChannelDiscoveryState::DeterminedLanguages(determined_languages) => {
-                        if ui.button("Add new to playlist").clicked() {
-                            todo!()
+                                .collect()
                         }
+                        ChannelDiscoveryState::FoundUploads(state) => {
+                            if ui.button("Filter by upload date").clicked() {
+                                state.filter(channel_discovery, channel_discovery.last_seen_video);
+                            }
 
-                        (
-                            determined_languages.channels.clone(),
-                            determined_languages.uploads.clone(),
-                            determined_languages.playlist_items.clone(),
-                            determined_languages.languages.clone(),
-                        )
-                    }
-                });
+                            state
+                                .channels
+                                .iter()
+                                .map(|(channel, meta)| {
+                                    (
+                                        channel.clone(),
+                                        meta.clone(),
+                                        state
+                                            .uploads
+                                            .get(channel)
+                                            .map(Vec::as_slice)
+                                            .unwrap_or_default()
+                                            .iter()
+                                            .map(|video| {
+                                                (
+                                                    video.clone(),
+                                                    state.videos[video].clone(),
+                                                    false,
+                                                    false,
+                                                )
+                                            })
+                                            .collect(),
+                                    )
+                                })
+                                .collect()
+                        }
+                        ChannelDiscoveryState::FilteredByDate(state) => {
+                            if ui.button("Find playlist items").clicked() {
+                                state.find_playlist_items(channel_discovery, access_token);
+                            }
+
+                            state
+                                .channels
+                                .iter()
+                                .map(|(channel, meta)| {
+                                    (
+                                        channel.clone(),
+                                        meta.clone(),
+                                        state
+                                            .uploads
+                                            .get(channel)
+                                            .map(Vec::as_slice)
+                                            .unwrap_or_default()
+                                            .iter()
+                                            .map(|video| {
+                                                (
+                                                    video.clone(),
+                                                    state.videos[video].clone(),
+                                                    state.new_videos.contains(video),
+                                                    false,
+                                                )
+                                            })
+                                            .collect(),
+                                    )
+                                })
+                                .collect()
+                        }
+                        ChannelDiscoveryState::FindingPlaylistItems(state) => {
+                            match state.total_playlist_items {
+                                Some(total) => {
+                                    let items = state.playlist_items.len();
+
+                                    ui.add(
+                                        ProgressBar::new((items as f32) / (total as f32))
+                                            .text(format!("{items}/{total}")),
+                                    );
+                                }
+                                None => {
+                                    ui.add(ProgressBar::new(0.0));
+                                }
+                            }
+
+                            state
+                                .channels
+                                .iter()
+                                .map(|(channel, meta)| {
+                                    (
+                                        channel.clone(),
+                                        meta.clone(),
+                                        state
+                                            .uploads
+                                            .get(channel)
+                                            .map(Vec::as_slice)
+                                            .unwrap_or_default()
+                                            .iter()
+                                            .map(|video| {
+                                                (
+                                                    video.clone(),
+                                                    state.videos[video].clone(),
+                                                    state.new_videos.contains(video),
+                                                    state.playlist_items.contains(video),
+                                                )
+                                            })
+                                            .collect(),
+                                    )
+                                })
+                                .collect()
+                        }
+                        ChannelDiscoveryState::FoundPlaylistItems(state) => {
+                            if ui.button("Determine languages").clicked() {
+                                state.determine_video_languages(channel_discovery, access_token);
+                            }
+
+                            state
+                                .channels
+                                .iter()
+                                .map(|(channel, meta)| {
+                                    (
+                                        channel.clone(),
+                                        meta.clone(),
+                                        state
+                                            .uploads
+                                            .get(channel)
+                                            .map(Vec::as_slice)
+                                            .unwrap_or_default()
+                                            .iter()
+                                            .map(|video| {
+                                                (
+                                                    video.clone(),
+                                                    state.videos[video].clone(),
+                                                    state.new_videos.contains(video),
+                                                    state.playlist_items.contains(video),
+                                                )
+                                            })
+                                            .collect(),
+                                    )
+                                })
+                                .collect()
+                        }
+                        ChannelDiscoveryState::DeterminingLanguages(state) => {
+                            let total_videos = state.new_videos.len();
+                            let videos_with_language = state.languages.values().flatten().count();
+
+                            ui.add(
+                                ProgressBar::new(
+                                    (videos_with_language as f32) / (total_videos as f32),
+                                )
+                                .text(format!("{videos_with_language}/{total_videos}")),
+                            );
+
+                            state
+                                .channels
+                                .iter()
+                                .map(|(channel, meta)| {
+                                    (
+                                        channel.clone(),
+                                        meta.clone(),
+                                        state
+                                            .uploads
+                                            .get(channel)
+                                            .map(Vec::as_slice)
+                                            .unwrap_or_default()
+                                            .iter()
+                                            .map(|video| {
+                                                (
+                                                    video.clone(),
+                                                    state.videos[video].clone(),
+                                                    state.new_videos.contains(video),
+                                                    state.playlist_items.contains(video),
+                                                )
+                                            })
+                                            .collect(),
+                                    )
+                                })
+                                .collect()
+                        }
+                        ChannelDiscoveryState::DeterminedLanguages(state) => {
+                            ui.horizontal(|ui| {
+                                ui.label("Languages: ");
+                                for (lang, vids) in state.languages.iter() {
+                                    let selected = state.excluded_languages.contains(lang);
+                                    if ui
+                                        .add(
+                                            Button::selectable(
+                                                selected,
+                                                format!("{lang} ({})", vids.len()),
+                                            )
+                                            .fill(ui.visuals().warn_fg_color),
+                                        )
+                                        .clicked()
+                                    {
+                                        if selected {
+                                            state.excluded_languages.remove(lang);
+                                        } else {
+                                            state.excluded_languages.insert(lang.clone());
+                                        }
+                                    };
+                                }
+                                ui.separator();
+
+                                if ui.button("Exclude").clicked() {
+                                    todo!()
+                                }
+
+                                if ui.button("Add new to playlist").clicked() {
+                                    todo!()
+                                }
+                            });
+
+                            state
+                                .channels
+                                .iter()
+                                .map(|(channel, meta)| {
+                                    (
+                                        channel.clone(),
+                                        meta.clone(),
+                                        state
+                                            .uploads
+                                            .get(channel)
+                                            .map(Vec::as_slice)
+                                            .unwrap_or_default()
+                                            .iter()
+                                            .map(|video| {
+                                                (
+                                                    video.clone(),
+                                                    state.videos[video].clone(),
+                                                    state.new_videos.contains(video),
+                                                    state.playlist_items.contains(video),
+                                                )
+                                            })
+                                            .collect(),
+                                    )
+                                })
+                                .collect()
+                        }
+                    });
 
             ui.horizontal_wrapped(|ui| {
-                ui.label("Channels: ");
-                ui.monospace(channels.len().to_string());
-                ui.separator();
-
-                ui.label("Channels with uploads: ");
-                ui.monospace(videos.len().to_string());
-                ui.separator();
-
-                ui.label("Videos: ");
-                ui.monospace(videos.values().map(Vec::len).sum::<usize>().to_string());
-                ui.separator();
-
-                ui.label("New videos: ");
-                ui.monospace(
-                    videos
-                        .values()
-                        .flat_map(|v| {
-                            v.iter().filter(|video| {
-                                video.published_at > self.channel_discovery.last_seen_video
-                            })
-                        })
-                        .count()
-                        .to_string(),
-                );
-                ui.separator();
-
-                ui.label("Playlist videos: ");
-                ui.monospace(playlist_items.len().to_string());
-                ui.separator();
-
-                ui.label("New videos not in playlist: ");
-                ui.monospace(
-                    videos
-                        .values()
-                        .flat_map(|v| {
-                            v.iter()
-                                .filter(|video| {
-                                    video.published_at > self.channel_discovery.last_seen_video
-                                })
-                                .filter(|video| !playlist_items.contains(&video.id))
-                        })
-                        .count()
-                        .to_string(),
-                );
-                ui.separator();
-
-                ui.label("Languages: ");
-                for lang in languages.keys() {
-                    let selected = self.excluded_languages.contains(lang);
-                    if ui
-                        .add(Button::selectable(selected, lang).fill(ui.visuals().warn_fg_color))
-                        .clicked()
-                    {
-                        if selected {
-                            self.excluded_languages.remove(lang);
-                        } else {
-                            self.excluded_languages.insert(lang.clone());
-                        }
-                    };
-                }
-                ui.separator();
-
-                ui.label("Previous last seen video: ");
-                ui.monospace(self.channel_discovery.last_seen_video.to_string());
-
-                if let Some(last_seen) = videos
-                    .values()
-                    .flat_map(|v| v.iter().map(|video| video.published_at))
-                    .max()
-                {
-                    ui.label("Current last seen video: ");
-                    ui.monospace(last_seen.to_string());
-                }
-
                 ui.checkbox(&mut self.show_only_new, "Show only new");
             });
 
-            let rows = self.table_cache.process(channels, |channels| {
-                tracing::debug!("sort");
-                let mut rows = channels
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect::<Vec<_>>();
-                rows.sort_unstable_by_key(|(_, m)| m.name.clone());
-                rows
-            });
+            display_channels.sort_unstable_by_key(|(_, m, _)| m.name.clone());
 
-            let rows = if self.show_only_new {
-                &rows
-                    .iter()
-                    .filter(|&(channel, _)| {
-                        videos
-                            .get(channel)
-                            .map(|videos| {
-                                videos.iter().any(|video| {
-                                    video.published_at > self.channel_discovery.last_seen_video
-                                })
-                            })
-                            .unwrap_or(false)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-            } else {
-                rows
-            };
+            if self.show_only_new {
+                // Remove channels with no new
+                display_channels.retain(|(channel, meta, videos)| {
+                    videos.iter().any(|(_, _, is_new, in_playlist)| *is_new)
+                });
+            }
 
             // TODO: calculate quota?
             ScrollArea::both().auto_shrink(Vec2b::FALSE).show(ui, |ui| {
@@ -367,21 +423,16 @@ impl eframe::App for AppUi {
                     ScrollArea::horizontal(),
                     ui,
                     300.0,
-                    rows.len(),
+                    display_channels.len(),
                     |ui, range| {
-                        for (i, (channel_id, channel_metadata)) in
-                            rows[range.clone()].iter().enumerate()
+                        for (i, (channel_id, channel_metadata, videos)) in
+                            display_channels[range.clone()].iter().enumerate()
                         {
                             let i = i + range.start;
 
                             ui.vertical(|ui| {
                                 ui.set_width(300.0);
                                 ui.take_available_height();
-
-                                ui.vertical_centered_justified(|ui| {
-                                    ui.label(format!("#{i}"));
-                                });
-                                ui.separator();
 
                                 ui.horizontal(|ui| {
                                     ui.add_sized(
@@ -400,64 +451,58 @@ impl eframe::App for AppUi {
 
                                 ui.separator();
 
-                                let videos = videos
-                                    .get(channel_id)
-                                    .map(|v| v.as_slice())
-                                    .unwrap_or_default();
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{} videos loaded", videos.len()));
 
-                                ui.label(format!("{} videos loaded", videos.len()));
+                                    let new_videos = videos
+                                        .iter()
+                                        .filter(|(_, _, is_new, in_playlist)| *is_new)
+                                        .count();
+                                    let in_playlist_videos = videos
+                                        .iter()
+                                        .filter(|(_, _, is_new, in_playlist)| *in_playlist)
+                                        .count();
+
+                                    ui.label(format!("{} new videos", new_videos));
+                                    ui.label(format!("{} videos in playlist", in_playlist_videos));
+                                });
 
                                 ui.separator();
 
-                                for video in videos {
-                                    let new =
-                                        video.published_at > self.channel_discovery.last_seen_video;
-
-                                    if self.show_only_new && !new {
+                                for (video, meta, is_new, in_playlist) in videos {
+                                    if self.show_only_new && !is_new {
                                         break;
                                     }
 
                                     ui.horizontal(|ui| {
-                                        ui.label(format!("#{}", video.position));
+                                        ui.label(format!("#{}", meta.position));
 
-                                        let thumbnail =
-                                            if self.excluded_languages.iter().any(|lang| {
-                                                languages.get(lang).unwrap().contains(&video.id)
-                                            }) {
-                                                ui.visuals_mut().override_text_color =
-                                                    Some(Color32::RED);
-
-                                                true
-                                            } else if playlist_items.contains(&video.id) {
-                                                ui.visuals_mut().override_text_color =
-                                                    Some(Color32::GOLD);
-
-                                                true
-                                            } else if new {
-                                                ui.visuals_mut().override_text_color =
-                                                    Some(Color32::GREEN);
-                                                true
-                                            } else {
-                                                false
-                                            };
-
-                                        if thumbnail {
+                                        if *in_playlist || *is_new {
                                             ui.add_sized(
                                                 Vec2::ONE
                                                     * ui.text_style_height(&TextStyle::Monospace)
-                                                    * 3.0,
-                                                Image::new(&video.thumbnail),
+                                                    * 4.0,
+                                                Image::new(&meta.thumbnail),
                                             );
                                         } else {
                                             ui.add_space(
-                                                ui.text_style_height(&TextStyle::Monospace) * 3.0,
+                                                ui.text_style_height(&TextStyle::Monospace) * 4.0,
                                             );
                                         };
 
                                         ui.vertical(|ui| {
-                                            ui.label(&video.title);
-                                            ui.label(video.id.to_string());
-                                            ui.label(video.published_at.to_string());
+                                            ui.label(&meta.title);
+                                            ui.label(video.to_string());
+                                            ui.label(meta.published_at.to_string());
+
+                                            ui.horizontal(|ui| {
+                                                if *in_playlist {
+                                                    ui.colored_label(Color32::GOLD, "PLAYLIST");
+                                                }
+                                                if *is_new {
+                                                    ui.colored_label(Color32::GREEN, "NEW");
+                                                }
+                                            });
                                             ui.add_space(10.0);
                                         })
                                     });
