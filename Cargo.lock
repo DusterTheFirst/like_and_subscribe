@@ -556,17 +556,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bstr"
-version = "1.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "234113d19d0d7d613b40e86fb654acf958910802bcceab913a4f9e7cda03b1a4"
-dependencies = [
- "memchr",
- "regex-automata",
- "serde",
-]
-
-[[package]]
 name = "built"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2408,7 +2397,6 @@ dependencies = [
 name = "like_and_subscribe"
 version = "0.1.0"
 dependencies = [
- "bstr",
  "dialoguer",
  "eframe",
  "egui_extras",
@@ -2421,6 +2409,7 @@ dependencies = [
  "oauth2",
  "rayon",
  "redb",
+ "regex",
  "serde",
  "serde_derive",
  "serde_json",
@@ -3630,6 +3619,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "regex"
+version = "1.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "843bc0191f75f3e22651ae5f1e72939ab2f72a4bc30fa80a066bd66edefc24d4"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]

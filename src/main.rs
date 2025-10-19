@@ -5,9 +5,9 @@ use envconfig::Envconfig;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
-use crate::{api::channels::ChannelDiscovery, database::Database, oauth::OAuthManager, ui::AppUi};
+use crate::{discovery::ChannelDiscovery, database::Database, oauth::OAuthManager, ui::AppUi};
 
-mod api;
+mod discovery;
 mod database;
 mod oauth;
 mod ui;

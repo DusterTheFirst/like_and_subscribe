@@ -7,7 +7,6 @@ edition = "2024"
 opt-level = 3
 
 [dependencies]
-bstr               = "1.12.0"
 google-youtube3    = { version = "6.0.0", default-features = false }
 jiff               = { version = "0.2.15", features = ["serde"] }
 serde              = "1.0.219"
@@ -28,3 +27,4 @@ image              = { version = "0.25", features = ["jpeg"] }
 nutype             = "0.6.2"
 rayon = "1.11.0"
 dialoguer = { version = "0.12.0", default-features = false }
+regex = "1.12.2"
