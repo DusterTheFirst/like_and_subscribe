@@ -9,7 +9,7 @@ use eframe::egui::{
     Context,
     ahash::{HashMap, HashMapExt, HashSet, HashSetExt as _},
 };
-use google_youtube3::api::{PlaylistItemListResponse, SubscriptionListResponse};
+use google_youtube3::api::{PlaylistItemListResponse, SubscriptionListResponse, VideoListResponse};
 use jiff::Timestamp;
 use oauth2::{AccessToken, ureq};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -199,6 +199,41 @@ impl ChannelDiscovery {
                     })
                 }
             }
+            ChannelDiscoveryState::DeterminingLanguages(DeterminingLanguages {
+                channels,
+                uploads,
+                playlist_items,
+
+                mut languages,
+
+                handle,
+                incoming,
+            }) => {
+                while let Ok((video, language)) = incoming.try_recv() {
+                    languages.entry(language).or_default().insert(video);
+                }
+
+                if handle.is_finished() {
+                    handle.join().unwrap();
+                    ChannelDiscoveryState::DeterminedLanguages(DeterminedLanguages {
+                        channels,
+                        uploads,
+                        playlist_items,
+                        languages,
+                    })
+                } else {
+                    ChannelDiscoveryState::DeterminingLanguages(DeterminingLanguages {
+                        channels,
+                        uploads,
+                        playlist_items,
+
+                        languages,
+
+                        handle,
+                        incoming,
+                    })
+                }
+            }
             state => state,
         };
 
@@ -328,6 +363,59 @@ pub struct FoundPlaylistItems {
     pub playlist_items: HashSet<VideoId>,
 }
 
+impl FoundPlaylistItems {
+    pub fn determine_video_languages(
+        &mut self,
+        discovery: &mut ChannelDiscovery,
+        access_token: AccessToken,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let context = discovery.context.clone();
+
+        let videos = self
+            .uploads
+            .values()
+            .flat_map(|v| v.iter())
+            .filter(|v| v.published_at > discovery.last_seen_video)
+            .filter(|v| !self.playlist_items.contains(&v.id))
+            .map(|v| &v.id)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let handle = std::thread::spawn(move || {
+            determine_video_languages(videos, access_token, tx, context);
+        });
+
+        discovery.state = ChannelDiscoveryState::DeterminingLanguages(DeterminingLanguages {
+            channels: std::mem::take(&mut self.channels),
+            uploads: std::mem::take(&mut self.uploads),
+            playlist_items: std::mem::take(&mut self.playlist_items),
+
+            languages: HashMap::new(),
+
+            incoming: rx,
+            handle,
+        });
+    }
+}
+
+pub struct DeterminingLanguages {
+    pub channels: HashMap<ChannelId, ChannelMetadata>,
+    pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
+    pub playlist_items: HashSet<VideoId>,
+    pub languages: HashMap<String, HashSet<VideoId>>,
+
+    handle: JoinHandle<()>,
+    incoming: Receiver<(VideoId, String)>,
+}
+
+pub struct DeterminedLanguages {
+    pub channels: HashMap<ChannelId, ChannelMetadata>,
+    pub uploads: HashMap<ChannelId, Vec<VideoMetadata>>,
+    pub playlist_items: HashSet<VideoId>,
+    pub languages: HashMap<String, HashSet<VideoId>>,
+}
+
 pub enum ChannelDiscoveryState {
     Idle(Idle),
 
@@ -339,6 +427,9 @@ pub enum ChannelDiscoveryState {
 
     FindingPlaylistItems(FindingPlaylistItems),
     FoundPlaylistItems(FoundPlaylistItems),
+
+    DeterminingLanguages(DeterminingLanguages),
+    DeterminedLanguages(DeterminedLanguages),
 }
 
 impl Default for ChannelDiscoveryState {
@@ -552,5 +643,44 @@ fn find_playlist_items(
         if page_token.is_none() {
             break;
         }
+    }
+}
+
+fn determine_video_languages(
+    video_ids: Vec<VideoId>,
+    token: AccessToken,
+    channel: Sender<(VideoId, String)>,
+    context: Context,
+) {
+    for chunk in video_ids.chunks(50) {
+        let url = "https://www.googleapis.com/youtube/v3/videos?part=id,snippet&maxResults=50";
+        let url = format!(
+            "{url}&id={}",
+            chunk
+                .iter()
+                .map(VideoId::as_ref)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        let json = ureq::get(url.as_ref())
+            .set("Authorization", &format!("Bearer {}", token.secret()))
+            .call()
+            .unwrap()
+            .into_json::<VideoListResponse>()
+            .unwrap();
+
+        let items = json.items.unwrap();
+
+        for item in items {
+            channel
+                .send((
+                    VideoId::new(item.id.unwrap()),
+                    item.snippet.unwrap().default_audio_language.unwrap(),
+                ))
+                .unwrap();
+        }
+        tracing::info!("chunk");
+        context.request_repaint();
     }
 }
