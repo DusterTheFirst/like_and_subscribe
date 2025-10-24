@@ -9,7 +9,8 @@ use eframe::egui::{
     ahash::{HashMap, HashMapExt, HashSet, HashSetExt as _},
 };
 use google_youtube3::api::{
-    PlaylistItemListResponse, PlaylistListResponse, SubscriptionListResponse, VideoListResponse,
+    Playlist, PlaylistItem, PlaylistItemListResponse, PlaylistItemSnippet, PlaylistListResponse,
+    PlaylistSnippet, ResourceId, SubscriptionListResponse, VideoListResponse,
 };
 use jiff::Timestamp;
 use oauth2::{AccessToken, ureq};
@@ -262,6 +263,53 @@ impl ChannelDiscovery {
                     })
                 }
             }
+            ChannelDiscoveryState::AddingToPlaylist(AddingToPlaylist {
+                channels,
+                videos,
+
+                uploads,
+                new_videos,
+                mut playlist_items,
+                excluded_languages,
+
+                video_languages,
+
+                handle,
+                incoming,
+            }) => {
+                while let Ok(video) = incoming.try_recv() {
+                    playlist_items.insert(video);
+                }
+
+                if handle.is_finished() {
+                    handle.join().unwrap();
+                    ChannelDiscoveryState::Done(Done {
+                        channels,
+                        videos,
+
+                        uploads,
+                        video_languages,
+
+                        new_videos,
+                        playlist_items,
+                    })
+                } else {
+                    ChannelDiscoveryState::AddingToPlaylist(AddingToPlaylist {
+                        channels,
+                        videos,
+
+                        uploads,
+                        video_languages,
+
+                        new_videos,
+                        playlist_items,
+                        excluded_languages,
+
+                        handle,
+                        incoming,
+                    })
+                }
+            }
             state => state,
         };
 
@@ -502,6 +550,83 @@ pub struct DeterminedLanguages {
     pub excluded_languages: HashSet<String>,
 }
 
+impl DeterminedLanguages {
+    pub fn add_to_playlist(&mut self, discovery: &mut ChannelDiscovery, access_token: AccessToken) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let context = discovery.context.clone();
+        let playlist_id = discovery.playlist_id.clone();
+
+        let exclude = self
+            .playlist_items
+            .iter()
+            .chain(
+                self.video_languages
+                    .iter()
+                    .filter(|(_, lang)| self.excluded_languages.contains(*lang))
+                    .map(|(k, _)| k),
+            )
+            .cloned()
+            .collect();
+
+        let videos = self
+            .new_videos
+            .difference(&exclude)
+            .cloned()
+            .map(|id| {
+                let meta = self.videos[&id].clone();
+                (id, meta)
+            })
+            .collect::<Vec<_>>();
+
+        let handle = std::thread::spawn(move || {
+            let most_recent = add_to_playlist(videos, &playlist_id, &access_token, tx, context);
+
+            set_playlist_metadata(playlist_id, &access_token, most_recent);
+        });
+
+        discovery.state = ChannelDiscoveryState::AddingToPlaylist(AddingToPlaylist {
+            channels: std::mem::take(&mut self.channels),
+            videos: std::mem::take(&mut self.videos),
+
+            uploads: std::mem::take(&mut self.uploads),
+            video_languages: std::mem::take(&mut self.video_languages),
+
+            new_videos: std::mem::take(&mut self.new_videos),
+            playlist_items: std::mem::take(&mut self.playlist_items),
+            excluded_languages: std::mem::take(&mut self.excluded_languages),
+
+            incoming: rx,
+            handle,
+        });
+    }
+}
+
+pub struct AddingToPlaylist {
+    pub channels: HashMap<ChannelId, ChannelMetadata>,
+    pub videos: HashMap<VideoId, VideoMetadata>,
+
+    pub uploads: HashMap<ChannelId, Vec<VideoId>>,
+    pub video_languages: HashMap<VideoId, String>,
+
+    pub new_videos: HashSet<VideoId>,
+    pub playlist_items: HashSet<VideoId>,
+    pub excluded_languages: HashSet<String>,
+
+    handle: JoinHandle<()>,
+    incoming: Receiver<VideoId>,
+}
+
+pub struct Done {
+    pub channels: HashMap<ChannelId, ChannelMetadata>,
+    pub videos: HashMap<VideoId, VideoMetadata>,
+
+    pub uploads: HashMap<ChannelId, Vec<VideoId>>,
+    pub video_languages: HashMap<VideoId, String>,
+
+    pub new_videos: HashSet<VideoId>,
+    pub playlist_items: HashSet<VideoId>,
+}
+
 pub enum ChannelDiscoveryState {
     Idle(Idle),
 
@@ -518,6 +643,9 @@ pub enum ChannelDiscoveryState {
 
     DeterminingLanguages(DeterminingLanguages),
     DeterminedLanguages(DeterminedLanguages),
+
+    AddingToPlaylist(AddingToPlaylist),
+    Done(Done),
 }
 
 impl Default for ChannelDiscoveryState {
@@ -776,9 +904,55 @@ fn determine_video_languages(
     }
 }
 
-fn get_playlist_metadata(playlist_id: PlaylistId, token: &AccessToken) -> Timestamp {
+fn add_to_playlist(
+    videos: Vec<(VideoId, VideoMetadata)>,
+    playlist_id: &PlaylistId,
+    access_token: &AccessToken,
+    channel: Sender<VideoId>,
+    context: Context,
+) -> Timestamp {
+    assert!(!videos.is_empty(), "if videos is empty, this breaks");
+
+    let mut most_recent_upload = Timestamp::MIN;
+
+    let url = format!(
+        "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId={playlist_id}"
+    );
+
+    for (video_id, meta) in videos {
+        ureq::post(url.as_ref())
+            .set(
+                "Authorization",
+                &format!("Bearer {}", access_token.secret()),
+            )
+            .send_json(PlaylistItem {
+                snippet: Some(PlaylistItemSnippet {
+                    playlist_id: Some(playlist_id.to_string()),
+                    resource_id: Some(ResourceId {
+                        // TODO: resource id should be an enum with a tag
+                        kind: Some(String::from("youtube#video")),
+                        video_id: Some(video_id.to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+
+        channel.send(video_id).unwrap();
+        most_recent_upload = meta.published_at.max(most_recent_upload);
+
+        tracing::info!("video");
+        context.request_repaint();
+    }
+
+    most_recent_upload
+}
+
+fn get_playlist(playlist_id: &PlaylistId, token: &AccessToken) -> Playlist {
     let url =
-        format!("https://www.googleapis.com/youtube/v3/playlists?part=snippet&id={playlist_id}");
+        format!("https://www.googleapis.com/youtube/v3/playlists?part=snippet,id&id={playlist_id}");
 
     let json = ureq::get(url.as_ref())
         .set("Authorization", &format!("Bearer {}", token.secret()))
@@ -787,17 +961,45 @@ fn get_playlist_metadata(playlist_id: PlaylistId, token: &AccessToken) -> Timest
         .into_json::<PlaylistListResponse>()
         .unwrap();
 
-    let playlist = json.items.unwrap().pop().unwrap();
+    json.items.unwrap().pop().unwrap()
+}
 
+fn get_playlist_metadata(playlist_id: PlaylistId, token: &AccessToken) -> Timestamp {
+    let playlist = get_playlist(&playlist_id, token);
     let description = playlist.snippet.unwrap().description.unwrap();
 
     let pattern = " | Last update: ";
-    let timestamp_pos = description.find(pattern).unwrap();
+    let timestamp_pos = description.find(pattern).unwrap() + pattern.len();
 
-    description[timestamp_pos + pattern.len()..]
+    description[timestamp_pos..]
         .trim()
         .parse::<Timestamp>()
         .unwrap()
 }
 
-fn set_playlist_metadata(playlist_id: PlaylistId, token: AccessToken, last_update: Timestamp) {}
+fn set_playlist_metadata(playlist_id: PlaylistId, token: &AccessToken, last_update: Timestamp) {
+    let playlist = get_playlist(&playlist_id, token);
+
+    let snippet = playlist.snippet.unwrap();
+    let description = snippet.description.unwrap();
+
+    let pattern = " | Last update: ";
+    let timestamp_pos = description.find(pattern).unwrap() + pattern.len();
+
+    let description = format!("{}{}", &description[..timestamp_pos], last_update);
+
+    let url =
+        format!("https://www.googleapis.com/youtube/v3/playlists?part=snippet&id={playlist_id}");
+
+    ureq::put(url.as_ref())
+        .set("Authorization", &format!("Bearer {}", token.secret()))
+        .send_json(Playlist {
+            id: playlist.id,
+            snippet: Some(PlaylistSnippet {
+                description: Some(description),
+                ..snippet
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+}

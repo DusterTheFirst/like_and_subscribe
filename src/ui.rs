@@ -389,7 +389,7 @@ impl eframe::App for AppUi {
                                 ui.separator();
 
                                 if ui.button("Add to playlist").clicked() {
-                                    todo!()
+                                    state.add_to_playlist(channel_discovery, access_token);
                                 }
                             });
 
@@ -425,6 +425,76 @@ impl eframe::App for AppUi {
                                 })
                                 .collect()
                         }
+                        ChannelDiscoveryState::AddingToPlaylist(state) => {
+                            let total_videos = state.new_videos.len();
+                            let videos_in_playlist = state.playlist_items.len();
+
+                            ui.add(
+                                ProgressBar::new(
+                                    (videos_in_playlist as f32) / (total_videos as f32),
+                                )
+                                .text(format!("{videos_in_playlist}/{total_videos}")),
+                            );
+
+                            state
+                                .channels
+                                .iter()
+                                .map(|(channel, meta)| {
+                                    (
+                                        channel.clone(),
+                                        meta.clone(),
+                                        state
+                                            .uploads
+                                            .get(channel)
+                                            .map(Vec::as_slice)
+                                            .unwrap_or_default()
+                                            .iter()
+                                            .map(|video| {
+                                                (
+                                                    video.clone(),
+                                                    state.videos[video].clone(),
+                                                    state.new_videos.contains(video),
+                                                    state.playlist_items.contains(video),
+                                                    state
+                                                        .video_languages
+                                                        .get(video)
+                                                        .map(|lang| (lang.clone(), false)),
+                                                )
+                                            })
+                                            .collect(),
+                                    )
+                                })
+                                .collect()
+                        }
+                        ChannelDiscoveryState::Done(state) => state
+                            .channels
+                            .iter()
+                            .map(|(channel, meta)| {
+                                (
+                                    channel.clone(),
+                                    meta.clone(),
+                                    state
+                                        .uploads
+                                        .get(channel)
+                                        .map(Vec::as_slice)
+                                        .unwrap_or_default()
+                                        .iter()
+                                        .map(|video| {
+                                            (
+                                                video.clone(),
+                                                state.videos[video].clone(),
+                                                state.new_videos.contains(video),
+                                                state.playlist_items.contains(video),
+                                                state
+                                                    .video_languages
+                                                    .get(video)
+                                                    .map(|lang| (lang.clone(), false)),
+                                            )
+                                        })
+                                        .collect(),
+                                )
+                            })
+                            .collect(),
                     });
 
             ui.horizontal_wrapped(|ui| {
@@ -485,35 +555,7 @@ impl eframe::App for AppUi {
 
                             ui.separator();
 
-                            ui.horizontal(|ui| {
-                                ui.label(format!("{} videos loaded", videos.len()));
-
-                                let filter_new_count = videos
-                                    .iter()
-                                    .filter(|(_, _, is_new, in_playlist, lang)| *is_new)
-                                    .count();
-                                let filter_playlist_count = videos
-                                    .iter()
-                                    .filter(|(_, _, is_new, in_playlist, lang)| *in_playlist)
-                                    .count();
-                                let filter_lang_count = videos
-                                    .iter()
-                                    .filter(|(_, _, is_new, in_playlist, lang)| {
-                                        lang.as_ref().is_some_and(|(_, exclude)| *exclude)
-                                    })
-                                    .count();
-
-                                ui.label(format!(
-                                    "{}/{} new videos",
-                                    filter_new_count,
-                                    videos.len()
-                                ));
-                                ui.label(format!(
-                                    "{}/{} videos in playlist",
-                                    filter_playlist_count, filter_new_count
-                                ));
-                                ui.label(format!("{} videos excluded lang", filter_lang_count,));
-                            });
+                            ui.label(format!("{} videos filtered", videos.len()));
 
                             ui.separator();
 
