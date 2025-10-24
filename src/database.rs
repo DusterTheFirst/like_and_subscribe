@@ -1,6 +1,5 @@
 use std::{path::PathBuf, sync::Arc};
 
-use jiff::Timestamp;
 use oauth2::RefreshToken;
 use redb::{ReadableDatabase as _, TableDefinition};
 
@@ -17,7 +16,6 @@ impl Database {
 
                 let txn = db.begin_write().unwrap();
                 txn.open_table(OAuth::TABLE).unwrap();
-                txn.open_table(UpdateDate::TABLE).unwrap();
                 txn.commit().unwrap();
 
                 db
@@ -27,10 +25,6 @@ impl Database {
 
     pub fn oauth(&self) -> OAuth<'_> {
         OAuth { database: self }
-    }
-
-    pub fn update_date(&self) -> UpdateDate<'_> {
-        UpdateDate { database: self }
     }
 }
 
@@ -69,32 +63,5 @@ impl<'a> OAuth<'a> {
         } else {
             None
         }
-    }
-}
-
-pub struct UpdateDate<'a> {
-    database: &'a Database,
-}
-impl<'a> UpdateDate<'a> {
-    const TABLE: TableDefinition<'static, (), i64> = TableDefinition::new("last_seen_video");
-
-    pub fn set(&self, timestamp: Timestamp) {
-        let write_txn = self.database.connection.begin_write().unwrap();
-        {
-            let mut table = write_txn.open_table(Self::TABLE).unwrap();
-            table
-                .insert((), timestamp.as_millisecond())
-                .unwrap();
-        }
-        write_txn.commit().unwrap();
-    }
-
-    pub fn get(&self) -> Option<Timestamp> {
-        let read_txn = self.database.connection.begin_read().unwrap();
-        let table = read_txn.open_table(Self::TABLE).unwrap();
-
-        table.get(()).unwrap().map(|value| {
-            Timestamp::from_millisecond(value.value()).expect("stored timestamp should be valid")
-        })
     }
 }

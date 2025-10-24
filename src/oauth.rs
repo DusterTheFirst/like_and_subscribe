@@ -285,8 +285,6 @@ impl OAuthManager {
     }
 
     fn refresh(&mut self, refresh_token: RefreshToken) {
-        info!("Refreshing");
-
         let handle = std::thread::Builder::new()
             .name("oauth".to_owned())
             .spawn({
@@ -295,6 +293,7 @@ impl OAuthManager {
                 let ctx: Context = self.context.clone();
 
                 move || {
+                    info!("Refreshing");
                     let refresh_result = oauth_client
                         .exchange_refresh_token(&refresh_token)
                         .request(&ureq::agent())
@@ -304,6 +303,8 @@ impl OAuthManager {
                         + refresh_result
                             .expires_in()
                             .expect("expiration should be provided");
+
+                    info!("refreshed");
 
                     ctx.request_repaint();
                     (refresh_result.access_token().clone(), expires_at)

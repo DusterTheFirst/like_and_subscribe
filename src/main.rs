@@ -67,11 +67,7 @@ fn main() -> eframe::Result<()> {
                     database.clone(),
                     cc.egui_ctx.clone(),
                 ),
-                ChannelDiscovery::new(
-                    database.clone(),
-                    config.youtube_playlist_id,
-                    cc.egui_ctx.clone(),
-                ),
+                ChannelDiscovery::new(config.youtube_playlist_id, cc.egui_ctx.clone()),
             )))
         }),
     )

@@ -1,6 +1,7 @@
+use std::collections::BTreeSet;
+
 use eframe::egui::{
-    self, Button, CentralPanel, Color32, Image, ProgressBar, Rect, ScrollArea, TextStyle,
-    UiBuilder, Vec2, Vec2b,
+    Button, CentralPanel, Color32, Image, ProgressBar, ScrollArea, TextStyle, Vec2, Vec2b,
 };
 use jiff::tz::TimeZone;
 
@@ -14,7 +15,9 @@ pub struct AppUi {
 
     channel_discovery: ChannelDiscovery,
 
-    show_only_new: bool,
+    filter_new: bool,
+    filter_playlist: bool,
+    filter_language: bool,
 }
 
 impl AppUi {
@@ -23,7 +26,9 @@ impl AppUi {
             auth,
             channel_discovery,
 
-            show_only_new: false,
+            filter_new: false,
+            filter_playlist: false,
+            filter_language: false,
         }
     }
 }
@@ -122,12 +127,9 @@ impl eframe::App for AppUi {
                         }
                         ChannelDiscoveryState::Discovered(state) => {
                             ui.horizontal(|ui| {
+                                ui.label(format!("Last update: {}", state.last_update));
                                 if ui.button("Find uploads until date").clicked() {
-                                    state.find_uploads(
-                                        channel_discovery,
-                                        channel_discovery.last_seen_video,
-                                        access_token,
-                                    );
+                                    state.find_uploads(channel_discovery, access_token);
                                 }
                             });
 
@@ -165,6 +167,7 @@ impl eframe::App for AppUi {
                                                     state.videos[video].clone(),
                                                     false,
                                                     false,
+                                                    None,
                                                 )
                                             })
                                             .collect(),
@@ -173,9 +176,12 @@ impl eframe::App for AppUi {
                                 .collect()
                         }
                         ChannelDiscoveryState::FoundUploads(state) => {
-                            if ui.button("Filter by upload date").clicked() {
-                                state.filter(channel_discovery, channel_discovery.last_seen_video);
-                            }
+                            ui.horizontal(|ui| {
+                                ui.label(format!("Last update: {}", state.last_update));
+                                if ui.button("Filter by upload date").clicked() {
+                                    state.filter(channel_discovery);
+                                }
+                            });
 
                             state
                                 .channels
@@ -196,6 +202,7 @@ impl eframe::App for AppUi {
                                                     state.videos[video].clone(),
                                                     false,
                                                     false,
+                                                    None,
                                                 )
                                             })
                                             .collect(),
@@ -227,6 +234,7 @@ impl eframe::App for AppUi {
                                                     state.videos[video].clone(),
                                                     state.new_videos.contains(video),
                                                     false,
+                                                    None,
                                                 )
                                             })
                                             .collect(),
@@ -268,6 +276,7 @@ impl eframe::App for AppUi {
                                                     state.videos[video].clone(),
                                                     state.new_videos.contains(video),
                                                     state.playlist_items.contains(video),
+                                                    None,
                                                 )
                                             })
                                             .collect(),
@@ -299,6 +308,7 @@ impl eframe::App for AppUi {
                                                     state.videos[video].clone(),
                                                     state.new_videos.contains(video),
                                                     state.playlist_items.contains(video),
+                                                    None,
                                                 )
                                             })
                                             .collect(),
@@ -308,7 +318,7 @@ impl eframe::App for AppUi {
                         }
                         ChannelDiscoveryState::DeterminingLanguages(state) => {
                             let total_videos = state.new_videos.len();
-                            let videos_with_language = state.languages.values().flatten().count();
+                            let videos_with_language = state.video_languages.len();
 
                             ui.add(
                                 ProgressBar::new(
@@ -336,6 +346,10 @@ impl eframe::App for AppUi {
                                                     state.videos[video].clone(),
                                                     state.new_videos.contains(video),
                                                     state.playlist_items.contains(video),
+                                                    state
+                                                        .video_languages
+                                                        .get(video)
+                                                        .map(|lang| (lang.clone(), false)),
                                                 )
                                             })
                                             .collect(),
@@ -346,13 +360,20 @@ impl eframe::App for AppUi {
                         ChannelDiscoveryState::DeterminedLanguages(state) => {
                             ui.horizontal(|ui| {
                                 ui.label("Languages: ");
-                                for (lang, vids) in state.languages.iter() {
+                                for lang in state.video_languages.values().collect::<BTreeSet<_>>()
+                                {
                                     let selected = state.excluded_languages.contains(lang);
+                                    let count = state
+                                        .video_languages
+                                        .values()
+                                        .filter(|l| l == &lang)
+                                        .count();
+
                                     if ui
                                         .add(
                                             Button::selectable(
                                                 selected,
-                                                format!("{lang} ({})", vids.len()),
+                                                format!("{lang} ({count})"),
                                             )
                                             .fill(ui.visuals().warn_fg_color),
                                         )
@@ -367,11 +388,7 @@ impl eframe::App for AppUi {
                                 }
                                 ui.separator();
 
-                                if ui.button("Exclude").clicked() {
-                                    todo!()
-                                }
-
-                                if ui.button("Add new to playlist").clicked() {
+                                if ui.button("Add to playlist").clicked() {
                                     todo!()
                                 }
                             });
@@ -395,6 +412,12 @@ impl eframe::App for AppUi {
                                                     state.videos[video].clone(),
                                                     state.new_videos.contains(video),
                                                     state.playlist_items.contains(video),
+                                                    state.video_languages.get(video).map(|lang| {
+                                                        (
+                                                            lang.clone(),
+                                                            state.excluded_languages.contains(lang),
+                                                        )
+                                                    }),
                                                 )
                                             })
                                             .collect(),
@@ -405,152 +428,145 @@ impl eframe::App for AppUi {
                     });
 
             ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut self.show_only_new, "Show only new");
+                ui.checkbox(&mut self.filter_new, "Filter by new");
+                ui.checkbox(&mut self.filter_playlist, "Filter by playlist");
+                ui.checkbox(&mut self.filter_language, "Filter by language");
             });
 
             display_channels.sort_unstable_by_key(|(_, m, _)| m.name.clone());
 
-            if self.show_only_new {
+            if self.filter_new {
                 // Remove channels with no new
-                display_channels.retain(|(channel, meta, videos)| {
-                    videos.iter().any(|(_, _, is_new, in_playlist)| *is_new)
+                display_channels.retain_mut(|(_, _, videos)| {
+                    videos.retain(|(_, _, is_new, in_playlist, language)| *is_new);
+
+                    !videos.is_empty()
+                });
+            }
+
+            if self.filter_playlist {
+                display_channels.retain_mut(|(_, _, videos)| {
+                    videos.retain(|(_, _, is_new, in_playlist, language)| !*in_playlist);
+
+                    !videos.is_empty()
+                });
+            }
+
+            if self.filter_language {
+                display_channels.retain_mut(|(_, _, videos)| {
+                    videos.retain(|(_, _, is_new, in_playlist, language)| {
+                        language.as_ref().is_some_and(|(_, exclude)| !*exclude)
+                    });
+
+                    !videos.is_empty()
                 });
             }
 
             // TODO: calculate quota?
             ScrollArea::both().auto_shrink(Vec2b::FALSE).show(ui, |ui| {
-                show_columns(
-                    ScrollArea::horizontal(),
-                    ui,
-                    300.0,
-                    display_channels.len(),
-                    |ui, range| {
-                        for (i, (channel_id, channel_metadata, videos)) in
-                            display_channels[range.clone()].iter().enumerate()
-                        {
-                            let i = i + range.start;
+                ui.horizontal(|ui| {
+                    for (channel_id, channel_metadata, videos) in display_channels.iter() {
+                        ui.vertical(|ui| {
+                            ui.set_width(300.0);
+                            ui.take_available_height();
 
-                            ui.vertical(|ui| {
-                                ui.set_width(300.0);
-                                ui.take_available_height();
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    Vec2::ONE * ui.text_style_height(&TextStyle::Monospace) * 3.0,
+                                    Image::new(&channel_metadata.profile_picture),
+                                );
 
-                                ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        Vec2::ONE
-                                            * ui.text_style_height(&TextStyle::Monospace)
-                                            * 3.0,
-                                        Image::new(&channel_metadata.profile_picture),
-                                    );
-
-                                    ui.vertical(|ui| {
-                                        ui.label(&channel_metadata.name);
-                                        ui.monospace(channel_id.as_ref());
-                                        ui.monospace(channel_id.playlist_long_form().as_ref());
-                                    })
-                                });
-
-                                ui.separator();
-
-                                ui.horizontal(|ui| {
-                                    ui.label(format!("{} videos loaded", videos.len()));
-
-                                    let new_videos = videos
-                                        .iter()
-                                        .filter(|(_, _, is_new, in_playlist)| *is_new)
-                                        .count();
-                                    let in_playlist_videos = videos
-                                        .iter()
-                                        .filter(|(_, _, is_new, in_playlist)| *in_playlist)
-                                        .count();
-
-                                    ui.label(format!("{} new videos", new_videos));
-                                    ui.label(format!("{} videos in playlist", in_playlist_videos));
-                                });
-
-                                ui.separator();
-
-                                for (video, meta, is_new, in_playlist) in videos {
-                                    if self.show_only_new && !is_new {
-                                        break;
-                                    }
-
-                                    ui.horizontal(|ui| {
-                                        ui.label(format!("#{}", meta.position));
-
-                                        if *in_playlist || *is_new {
-                                            ui.add_sized(
-                                                Vec2::ONE
-                                                    * ui.text_style_height(&TextStyle::Monospace)
-                                                    * 4.0,
-                                                Image::new(&meta.thumbnail),
-                                            );
-                                        } else {
-                                            ui.add_space(
-                                                ui.text_style_height(&TextStyle::Monospace) * 4.0,
-                                            );
-                                        };
-
-                                        ui.vertical(|ui| {
-                                            ui.label(&meta.title);
-                                            ui.label(video.to_string());
-                                            ui.label(meta.published_at.to_string());
-
-                                            ui.horizontal(|ui| {
-                                                if *in_playlist {
-                                                    ui.colored_label(Color32::GOLD, "PLAYLIST");
-                                                }
-                                                if *is_new {
-                                                    ui.colored_label(Color32::GREEN, "NEW");
-                                                }
-                                            });
-                                            ui.add_space(10.0);
-                                        })
-                                    });
-                                }
+                                ui.vertical(|ui| {
+                                    ui.label(&channel_metadata.name);
+                                    ui.monospace(channel_id.as_ref());
+                                    ui.monospace(channel_id.playlist_long_form().as_ref());
+                                })
                             });
 
                             ui.separator();
-                        }
-                    },
-                );
+
+                            ui.horizontal(|ui| {
+                                ui.label(format!("{} videos loaded", videos.len()));
+
+                                let filter_new_count = videos
+                                    .iter()
+                                    .filter(|(_, _, is_new, in_playlist, lang)| *is_new)
+                                    .count();
+                                let filter_playlist_count = videos
+                                    .iter()
+                                    .filter(|(_, _, is_new, in_playlist, lang)| *in_playlist)
+                                    .count();
+                                let filter_lang_count = videos
+                                    .iter()
+                                    .filter(|(_, _, is_new, in_playlist, lang)| {
+                                        lang.as_ref().is_some_and(|(_, exclude)| *exclude)
+                                    })
+                                    .count();
+
+                                ui.label(format!(
+                                    "{}/{} new videos",
+                                    filter_new_count,
+                                    videos.len()
+                                ));
+                                ui.label(format!(
+                                    "{}/{} videos in playlist",
+                                    filter_playlist_count, filter_new_count
+                                ));
+                                ui.label(format!("{} videos excluded lang", filter_lang_count,));
+                            });
+
+                            ui.separator();
+
+                            for (video, meta, is_new, in_playlist, lang) in videos {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("#{}", meta.position));
+
+                                    if *in_playlist || *is_new {
+                                        ui.add_sized(
+                                            Vec2::ONE
+                                                * ui.text_style_height(&TextStyle::Monospace)
+                                                * 4.0,
+                                            Image::new(&meta.thumbnail),
+                                        );
+                                    } else {
+                                        ui.add_space(
+                                            ui.text_style_height(&TextStyle::Monospace) * 4.0,
+                                        );
+                                    };
+
+                                    ui.vertical(|ui| {
+                                        ui.label(&meta.title);
+                                        ui.label(video.to_string());
+                                        ui.label(meta.published_at.to_string());
+
+                                        ui.horizontal(|ui| {
+                                            if *in_playlist {
+                                                ui.colored_label(Color32::GOLD, "PLAYLIST");
+                                            }
+                                            if *is_new {
+                                                ui.colored_label(Color32::GREEN, "NEW");
+                                            }
+                                            if let Some((lang, exclude)) = lang {
+                                                ui.colored_label(
+                                                    if *exclude {
+                                                        Color32::RED
+                                                    } else {
+                                                        Color32::PURPLE
+                                                    },
+                                                    lang,
+                                                );
+                                            }
+                                        });
+                                        ui.add_space(10.0);
+                                    })
+                                });
+                            }
+                        });
+
+                        ui.separator();
+                    }
+                });
             });
         });
     }
-}
-
-fn show_columns(
-    scroll_area: ScrollArea,
-    ui: &mut egui::Ui,
-    item_width_without_spacing: f32,
-    total_items: usize,
-    add_contents: impl FnOnce(&mut egui::Ui, std::ops::Range<usize>),
-) {
-    use egui::NumExt as _;
-
-    let spacing = ui.spacing().item_spacing;
-    let item_width_with_spacing = item_width_without_spacing + spacing.x;
-    scroll_area.show_viewport(ui, |ui, viewport| {
-        ui.set_width({
-            let total_items_f = total_items as f32;
-            let including_last_padding = item_width_with_spacing * total_items_f;
-            let width = including_last_padding - spacing.x;
-            width.at_least(0.0)
-        });
-
-        let min_col = (viewport.min.x / item_width_with_spacing).floor() as usize;
-        let max_col = (viewport.max.x / item_width_with_spacing).ceil() as usize + 1;
-        let max_col = max_col.at_most(total_items);
-
-        let x_min = ui.max_rect().left() + min_col as f32 * item_width_with_spacing;
-        let x_max = ui.max_rect().left() + max_col as f32 * item_width_with_spacing;
-
-        let rect = Rect::from_x_y_ranges(x_min..=x_max, ui.max_rect().y_range());
-
-        ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-            ui.skip_ahead_auto_ids(min_col);
-            ui.horizontal(|ui| {
-                add_contents(ui, min_col..max_col);
-            });
-        });
-    });
 }

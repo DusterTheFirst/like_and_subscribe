@@ -4,17 +4,16 @@ use std::{
     thread::JoinHandle,
 };
 
-use dialoguer::Input;
 use eframe::egui::{
     Context,
     ahash::{HashMap, HashMapExt, HashSet, HashSetExt as _},
 };
-use google_youtube3::api::{PlaylistItemListResponse, SubscriptionListResponse, VideoListResponse};
+use google_youtube3::api::{
+    PlaylistItemListResponse, PlaylistListResponse, SubscriptionListResponse, VideoListResponse,
+};
 use jiff::Timestamp;
 use oauth2::{AccessToken, ureq};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
-
-use crate::database::Database;
 
 #[nutype::nutype(
     derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Display, AsRef, Borrow, FromStr),
@@ -74,33 +73,17 @@ pub struct VideoMetadata {
 pub struct ChannelDiscovery {
     context: Context,
 
-    database: Database,
-
     state: ChannelDiscoveryState,
 
     pub playlist_id: PlaylistId,
-    pub last_seen_video: Timestamp,
 }
 
 impl ChannelDiscovery {
-    pub fn new(database: Database, playlist_id: PlaylistId, context: Context) -> Self {
+    pub fn new(playlist_id: PlaylistId, context: Context) -> Self {
         Self {
-            last_seen_video: database.update_date().get().unwrap_or_else(|| {
-                loop {
-                    match Input::<Timestamp>::new()
-                        .with_prompt("Timestamp of last seen video (YYYY-MM-DDTHH:MM:SSZ)?")
-                        .interact_text()
-                    {
-                        Ok(t) => return t,
-                        Err(error) => tracing::warn!(%error, "Invalid date"),
-                    }
-                }
-            }),
-
             context,
 
             playlist_id,
-            database,
 
             state: ChannelDiscoveryState::Idle(Idle {}),
         }
@@ -123,8 +106,10 @@ impl ChannelDiscovery {
                 }
 
                 if handle.is_finished() {
-                    handle.join().unwrap();
+                    let last_update = handle.join().unwrap();
                     ChannelDiscoveryState::Discovered(Discovered {
+                        last_update,
+
                         channels: discovered_channels,
                     })
                 } else {
@@ -137,6 +122,8 @@ impl ChannelDiscovery {
                 }
             }
             ChannelDiscoveryState::FindingUploads(FindingUploads {
+                last_update,
+
                 channels,
                 mut videos,
 
@@ -157,12 +144,15 @@ impl ChannelDiscovery {
                 if handle.is_finished() {
                     handle.join().unwrap();
                     ChannelDiscoveryState::FoundUploads(FoundUploads {
+                        last_update,
+
                         channels,
                         videos,
                         uploads,
                     })
                 } else {
                     ChannelDiscoveryState::FindingUploads(FindingUploads {
+                        last_update,
                         channels,
                         videos,
 
@@ -225,27 +215,36 @@ impl ChannelDiscovery {
                 new_videos,
                 playlist_items,
 
-                mut languages,
+                mut video_languages,
 
                 handle,
                 incoming,
             }) => {
                 while let Ok((video, language)) = incoming.try_recv() {
-                    languages.entry(language).or_default().insert(video);
+                    video_languages.insert(video, language);
                 }
 
                 if handle.is_finished() {
                     handle.join().unwrap();
                     ChannelDiscoveryState::DeterminedLanguages(DeterminedLanguages {
+                        // TODO: move somewhere else
+                        excluded_languages: HashSet::from_iter(
+                            video_languages
+                                .values()
+                                .collect::<HashSet<_>>()
+                                .into_iter()
+                                .filter(|l| !l.starts_with("en"))
+                                .cloned(),
+                        ),
+
                         channels,
                         videos,
 
                         uploads,
+                        video_languages,
+
                         new_videos,
                         playlist_items,
-                        languages,
-
-                        excluded_languages: HashSet::new(),
                     })
                 } else {
                     ChannelDiscoveryState::DeterminingLanguages(DeterminingLanguages {
@@ -253,10 +252,10 @@ impl ChannelDiscovery {
                         videos,
 
                         uploads,
+                        video_languages,
+
                         new_videos,
                         playlist_items,
-
-                        languages,
 
                         handle,
                         incoming,
@@ -282,9 +281,12 @@ impl Idle {
     pub fn start(&mut self, discovery: &mut ChannelDiscovery, access_token: AccessToken) {
         let (tx, rx) = std::sync::mpsc::channel();
         let context = discovery.context.clone();
+        let playlist_id = discovery.playlist_id.clone();
 
-        let handle = std::thread::spawn(|| {
-            get_all_channels(access_token, tx, context);
+        let handle = std::thread::spawn(move || {
+            get_all_channels(&access_token, tx, context);
+
+            get_playlist_metadata(playlist_id, &access_token)
         });
 
         discovery.state = ChannelDiscoveryState::Discovering(Discovering {
@@ -301,20 +303,17 @@ pub struct Discovering {
     pub channels: HashMap<ChannelId, ChannelMetadata>,
     pub total_channel_count: Option<i32>,
 
-    handle: JoinHandle<()>,
+    handle: JoinHandle<Timestamp>,
     incoming: Receiver<(i32, ChannelId, ChannelMetadata)>,
 }
 
 pub struct Discovered {
+    pub last_update: Timestamp,
+
     pub channels: HashMap<ChannelId, ChannelMetadata>,
 }
 impl Discovered {
-    pub fn find_uploads(
-        &mut self,
-        discovery: &mut ChannelDiscovery,
-        until: Timestamp,
-        access_token: AccessToken,
-    ) {
+    pub fn find_uploads(&mut self, discovery: &mut ChannelDiscovery, access_token: AccessToken) {
         let (tx, rx) = std::sync::mpsc::channel();
         let context = discovery.context.clone();
         let playlist_ids = self
@@ -322,12 +321,15 @@ impl Discovered {
             .keys()
             .map(|k| (k.clone(), k.playlist_long_form()))
             .collect::<Vec<_>>();
+        let last_update = self.last_update;
 
         let handle = std::thread::spawn(move || {
-            find_recent_uploads(playlist_ids, access_token, until, tx, context);
+            find_recent_uploads(playlist_ids, access_token, last_update, tx, context);
         });
 
         discovery.state = ChannelDiscoveryState::FindingUploads(FindingUploads {
+            last_update: self.last_update,
+
             channels: std::mem::take(&mut self.channels),
             uploads: HashMap::new(),
             videos: HashMap::new(),
@@ -339,6 +341,8 @@ impl Discovered {
 }
 
 pub struct FindingUploads {
+    pub last_update: Timestamp,
+
     pub channels: HashMap<ChannelId, ChannelMetadata>,
     pub videos: HashMap<VideoId, VideoMetadata>,
 
@@ -349,18 +353,20 @@ pub struct FindingUploads {
 }
 
 pub struct FoundUploads {
+    pub last_update: Timestamp,
+
     pub channels: HashMap<ChannelId, ChannelMetadata>,
     pub videos: HashMap<VideoId, VideoMetadata>,
 
     pub uploads: HashMap<ChannelId, Vec<VideoId>>,
 }
 impl FoundUploads {
-    pub fn filter(&mut self, discovery: &mut ChannelDiscovery, until: Timestamp) {
+    pub fn filter(&mut self, discovery: &mut ChannelDiscovery) {
         discovery.state = ChannelDiscoveryState::FilteredByDate(FilteredByDate {
             new_videos: self
                 .videos
                 .iter()
-                .filter(|(_, m)| m.published_at > until)
+                .filter(|(_, m)| m.published_at > self.last_update)
                 .map(|(id, _)| id.clone())
                 .collect(),
 
@@ -462,7 +468,7 @@ impl FoundPlaylistItems {
             new_videos: std::mem::take(&mut self.new_videos),
             playlist_items: std::mem::take(&mut self.playlist_items),
 
-            languages: HashMap::new(),
+            video_languages: HashMap::new(),
 
             incoming: rx,
             handle,
@@ -475,10 +481,10 @@ pub struct DeterminingLanguages {
     pub videos: HashMap<VideoId, VideoMetadata>,
 
     pub uploads: HashMap<ChannelId, Vec<VideoId>>,
+    pub video_languages: HashMap<VideoId, String>,
 
     pub new_videos: HashSet<VideoId>,
     pub playlist_items: HashSet<VideoId>,
-    pub languages: HashMap<String, HashSet<VideoId>>,
 
     handle: JoinHandle<()>,
     incoming: Receiver<(VideoId, String)>,
@@ -489,11 +495,10 @@ pub struct DeterminedLanguages {
     pub videos: HashMap<VideoId, VideoMetadata>,
 
     pub uploads: HashMap<ChannelId, Vec<VideoId>>,
+    pub video_languages: HashMap<VideoId, String>,
 
     pub new_videos: HashSet<VideoId>,
     pub playlist_items: HashSet<VideoId>,
-    pub languages: HashMap<String, HashSet<VideoId>>,
-
     pub excluded_languages: HashSet<String>,
 }
 
@@ -511,10 +516,8 @@ pub enum ChannelDiscoveryState {
     FindingPlaylistItems(FindingPlaylistItems),
     FoundPlaylistItems(FoundPlaylistItems),
 
-    // FilteredByPlaylist(FilteredByPlaylist),
     DeterminingLanguages(DeterminingLanguages),
     DeterminedLanguages(DeterminedLanguages),
-    // FilteredByLanguage(FilteredByPlaylist),
 }
 
 impl Default for ChannelDiscoveryState {
@@ -525,7 +528,7 @@ impl Default for ChannelDiscoveryState {
 
 // TODO: etag and caching
 fn get_all_channels(
-    token: AccessToken,
+    token: &AccessToken,
     channel: Sender<(i32, ChannelId, ChannelMetadata)>,
     context: Context,
 ) {
@@ -772,3 +775,29 @@ fn determine_video_languages(
         context.request_repaint();
     }
 }
+
+fn get_playlist_metadata(playlist_id: PlaylistId, token: &AccessToken) -> Timestamp {
+    let url =
+        format!("https://www.googleapis.com/youtube/v3/playlists?part=snippet&id={playlist_id}");
+
+    let json = ureq::get(url.as_ref())
+        .set("Authorization", &format!("Bearer {}", token.secret()))
+        .call()
+        .unwrap()
+        .into_json::<PlaylistListResponse>()
+        .unwrap();
+
+    let playlist = json.items.unwrap().pop().unwrap();
+
+    let description = playlist.snippet.unwrap().description.unwrap();
+
+    let pattern = " | Last update: ";
+    let timestamp_pos = description.find(pattern).unwrap();
+
+    description[timestamp_pos + pattern.len()..]
+        .trim()
+        .parse::<Timestamp>()
+        .unwrap()
+}
+
+fn set_playlist_metadata(playlist_id: PlaylistId, token: AccessToken, last_update: Timestamp) {}
