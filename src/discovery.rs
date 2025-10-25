@@ -673,12 +673,20 @@ fn get_all_channels(
         };
 
         // TODO: log errors in database?
-        let json = ureq::get(url.as_ref())
+        let json = match ureq::get(url.as_ref())
             .set("Authorization", &format!("Bearer {}", token.secret()))
             .call()
-            .unwrap()
-            .into_json::<SubscriptionListResponse>()
-            .unwrap();
+        {
+            Ok(res) => res,
+            Err(ureq::Error::Status(code, response)) => {
+                panic!("{code}: {:?}", response.into_json::<serde_json::Value>());
+            }
+            Err(error) => {
+                panic!("{error}");
+            }
+        }
+        .into_json::<SubscriptionListResponse>()
+        .unwrap();
 
         // TODO: FIXME: so many unwrap.. Somehow better error handling
 
@@ -754,8 +762,11 @@ fn find_recent_uploads(
                     // TODO: report this
                     break;
                 },
+                Err(ureq::Error::Status(code, response)) => {
+                    panic!("{playlist_id} | {code}: {:?}", response.into_json::<serde_json::Value>());
+                }
                 Err(error) => {
-                    panic!("{}", error)
+                    panic!("{playlist_id} | {error}")
                 }
             };
 
@@ -879,12 +890,20 @@ fn determine_video_languages(
                 .join(",")
         );
 
-        let json = ureq::get(url.as_ref())
+        let json = match ureq::get(url.as_ref())
             .set("Authorization", &format!("Bearer {}", token.secret()))
             .call()
-            .unwrap()
-            .into_json::<VideoListResponse>()
-            .unwrap();
+        {
+            Ok(res) => res,
+            Err(ureq::Error::Status(code, response)) => {
+                panic!("{code}: {:?}", response.into_json::<serde_json::Value>());
+            }
+            Err(error) => {
+                panic!("{error}")
+            }
+        }
+        .into_json::<VideoListResponse>()
+        .unwrap();
 
         let items = json.items.unwrap();
 
@@ -920,7 +939,7 @@ fn add_to_playlist(
     );
 
     for (video_id, meta) in videos {
-        ureq::post(url.as_ref())
+        match ureq::post(url.as_ref())
             .set(
                 "Authorization",
                 &format!("Bearer {}", access_token.secret()),
@@ -937,8 +956,18 @@ fn add_to_playlist(
                     ..Default::default()
                 }),
                 ..Default::default()
-            })
-            .unwrap();
+            }) {
+            Ok(_) => {}
+            Err(ureq::Error::Status(code, response)) => {
+                panic!(
+                    "{video_id} | {code}: {:?}",
+                    response.into_json::<serde_json::Value>()
+                );
+            }
+            Err(error) => {
+                panic!("{video_id} | {error}")
+            }
+        }
 
         channel.send(video_id).unwrap();
         most_recent_upload = meta.published_at.max(most_recent_upload);
@@ -954,12 +983,23 @@ fn get_playlist(playlist_id: &PlaylistId, token: &AccessToken) -> Playlist {
     let url =
         format!("https://www.googleapis.com/youtube/v3/playlists?part=snippet,id&id={playlist_id}");
 
-    let json = ureq::get(url.as_ref())
+    let json = match ureq::get(url.as_ref())
         .set("Authorization", &format!("Bearer {}", token.secret()))
         .call()
-        .unwrap()
-        .into_json::<PlaylistListResponse>()
-        .unwrap();
+    {
+        Ok(res) => res,
+        Err(ureq::Error::Status(code, response)) => {
+            panic!(
+                "{playlist_id} | {code}: {:?}",
+                response.into_json::<serde_json::Value>()
+            );
+        }
+        Err(error) => {
+            panic!("{playlist_id} | {error}")
+        }
+    }
+    .into_json::<PlaylistListResponse>()
+    .unwrap();
 
     json.items.unwrap().pop().unwrap()
 }
