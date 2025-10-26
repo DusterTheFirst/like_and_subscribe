@@ -294,10 +294,26 @@ impl OAuthManager {
 
                 move || {
                     info!("Refreshing");
-                    let refresh_result = oauth_client
+                    let refresh_result = match oauth_client
                         .exchange_refresh_token(&refresh_token)
                         .request(&ureq::agent())
-                        .unwrap();
+                    {
+                        Ok(res) => res,
+                        Err(oauth2::RequestTokenError::Request(
+                            oauth2::HttpClientError::Reqwest(error),
+                        )) => {
+                            match *error {
+                                ureq::Error::Status(code, response) => panic!(
+                                    "{code}: {:?}",
+                                    response.into_json::<serde_json::Value>()
+                                ),
+                                _ => panic!("{error}"),
+                            };
+                        }
+                        Err(error) => {
+                            panic!("{error}")
+                        }
+                    };
 
                     let expires_at = Timestamp::now()
                         + refresh_result
