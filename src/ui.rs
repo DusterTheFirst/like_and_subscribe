@@ -105,6 +105,8 @@ impl eframe::App for AppUi {
                             Vec::new()
                         }
                         ChannelDiscoveryState::Discovering(state) => {
+                            ui.label("Discovering Channels");
+
                             match state.total_channel_count {
                                 Some(total) => {
                                     let channels = state.channels.len();
@@ -140,6 +142,8 @@ impl eframe::App for AppUi {
                                 .collect()
                         }
                         ChannelDiscoveryState::FindingUploads(state) => {
+                            ui.label("Finding Uploads");
+
                             let uploads = state.uploads.len();
                             let channels = state.channels.len();
 
@@ -243,6 +247,8 @@ impl eframe::App for AppUi {
                                 .collect()
                         }
                         ChannelDiscoveryState::FindingPlaylistItems(state) => {
+                            ui.label("Finding Playlist Items");
+
                             match state.total_playlist_items {
                                 Some(total) => {
                                     let items = state.playlist_items.len();
@@ -317,6 +323,8 @@ impl eframe::App for AppUi {
                                 .collect()
                         }
                         ChannelDiscoveryState::DeterminingLanguages(state) => {
+                            ui.label("Determining Languages");
+
                             let total_videos = state.new_videos.len();
                             let videos_with_language = state.video_languages.len();
 
@@ -426,7 +434,9 @@ impl eframe::App for AppUi {
                                 .collect()
                         }
                         ChannelDiscoveryState::AddingToPlaylist(state) => {
-                            let total_videos = state.new_videos.len();
+                            ui.label("Adding videos to playlist");
+
+                            let total_videos = state.videos.len();
                             let videos_in_playlist = state.playlist_items.len();
 
                             ui.add(
@@ -466,35 +476,39 @@ impl eframe::App for AppUi {
                                 })
                                 .collect()
                         }
-                        ChannelDiscoveryState::Done(state) => state
-                            .channels
-                            .iter()
-                            .map(|(channel, meta)| {
-                                (
-                                    channel.clone(),
-                                    meta.clone(),
-                                    state
-                                        .uploads
-                                        .get(channel)
-                                        .map(Vec::as_slice)
-                                        .unwrap_or_default()
-                                        .iter()
-                                        .map(|video| {
-                                            (
-                                                video.clone(),
-                                                state.videos[video].clone(),
-                                                state.new_videos.contains(video),
-                                                state.playlist_items.contains(video),
-                                                state
-                                                    .video_languages
-                                                    .get(video)
-                                                    .map(|lang| (lang.clone(), false)),
-                                            )
-                                        })
-                                        .collect(),
-                                )
-                            })
-                            .collect(),
+                        ChannelDiscoveryState::Done(state) => {
+                            ui.label("Done.");
+
+                            state
+                                .channels
+                                .iter()
+                                .map(|(channel, meta)| {
+                                    (
+                                        channel.clone(),
+                                        meta.clone(),
+                                        state
+                                            .uploads
+                                            .get(channel)
+                                            .map(Vec::as_slice)
+                                            .unwrap_or_default()
+                                            .iter()
+                                            .map(|video| {
+                                                (
+                                                    video.clone(),
+                                                    state.videos[video].clone(),
+                                                    state.new_videos.contains(video),
+                                                    state.playlist_items.contains(video),
+                                                    state
+                                                        .video_languages
+                                                        .get(video)
+                                                        .map(|lang| (lang.clone(), false)),
+                                                )
+                                            })
+                                            .collect(),
+                                    )
+                                })
+                                .collect()
+                        }
                     });
 
             ui.horizontal_wrapped(|ui| {

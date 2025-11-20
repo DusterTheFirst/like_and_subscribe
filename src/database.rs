@@ -43,15 +43,6 @@ impl<'a> OAuth<'a> {
         write_txn.commit().unwrap();
     }
 
-    pub fn delete(&self) {
-        let write_txn = self.database.connection.begin_write().unwrap();
-        {
-            let mut table = write_txn.open_table(Self::TABLE).unwrap();
-            table.remove(()).unwrap();
-        }
-        write_txn.commit().unwrap();
-    }
-
     pub fn get(&self) -> Option<RefreshToken> {
         let read_txn = self.database.connection.begin_read().unwrap();
         let table = read_txn.open_table(Self::TABLE).unwrap();
