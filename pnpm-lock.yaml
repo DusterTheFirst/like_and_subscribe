@@ -29,6 +29,9 @@ importers:
       vite:
         specifier: ^7.2.4
         version: 7.3.0(@types/node@24.10.4)
+      zod:
+        specifier: ^4.3.4
+        version: 4.3.4
 
 packages:
 
@@ -529,6 +532,9 @@ packages:
   zimmerframe@1.1.4:
     resolution: {integrity: sha512-B58NGBEoc8Y9MWWCQGl/gq9xBCe4IiKM0a2x7GZdQKOW5Exr8S1W24J6OgM1njK8xCRGvAJIL/MxXHf6SkmQKQ==}
 
+  zod@4.3.4:
+    resolution: {integrity: sha512-Zw/uYiiyF6pUT1qmKbZziChgNPRu+ZRneAsMUDU6IwmXdWt5JwcUfy2bvLOCUtz5UniaN/Zx5aFttZYbYc7O/A==}
+
 snapshots:
 
   '@esbuild/aix-ppc64@0.27.2':
@@ -907,3 +913,5 @@ snapshots:
       vite: 7.3.0(@types/node@24.10.4)
 
   zimmerframe@1.1.4: {}
+
+  zod@4.3.4: {}

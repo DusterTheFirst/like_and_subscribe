@@ -9,13 +9,6 @@ function generateCryptoRandomState() {
         .replace(/=+$/, "");
 }
 
-export interface OAuthResponse {
-    access_token: string;
-    expires_in: number;
-    token_type: "Bearer";
-    refresh_token: string | undefined;
-}
-
 export function oauth2SignIn() {
     // create random state value and store in local storage
     const state = generateCryptoRandomState();
