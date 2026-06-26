@@ -15,6 +15,7 @@ use google_youtube3::api::{
 use jiff::Timestamp;
 use oauth2::{AccessToken, ureq};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use tracing::warn;
 
 #[nutype::nutype(
     derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Display, AsRef, Borrow, FromStr),
@@ -775,34 +776,38 @@ fn find_recent_uploads(
 
             let videos = items
                 .into_iter()
-                .map(|item| {
-                    let snippet = item.snippet.unwrap();
-                    let content_details = item.content_details.unwrap();
+                .flat_map(|item| {
+                    let snippet = item.snippet.clone().unwrap();
+                    let content_details = item.content_details.clone().unwrap();
+
+                    let Some(published_at) = content_details.video_published_at else {
+                        warn!(?item, "Encountered unpublished video");
+
+                        return None;
+                    };
 
                     let position = snippet.position.unwrap();
                     let title = snippet.title.unwrap();
                     let thumbnail = snippet.thumbnails.unwrap().default.unwrap();
 
                     let video_id = VideoId::new(content_details.video_id.unwrap());
-                    let published_at = Timestamp::from_millisecond(
-                        content_details
-                            .video_published_at
-                            .unwrap()
-                            .timestamp_millis(),
-                    )
-                    .unwrap();
+                    let published_at = Timestamp::from_millisecond(published_at.timestamp_millis()).unwrap();
 
                     if published_at <= until {
                         should_break = true;
                     }
 
-                    (video_id,
-                    VideoMetadata {
-                        title,
-                        thumbnail: thumbnail.url.unwrap(),
-                        published_at,
-                        position,
-                    })
+                    Some(
+                        (
+                            video_id,
+                            VideoMetadata {
+                                title,
+                                thumbnail: thumbnail.url.unwrap(),
+                                published_at,
+                                position,
+                            }
+                        )
+                    )
                 })
                 .collect::<Vec<_>>();
 
